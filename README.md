@@ -41,20 +41,22 @@ Requires `uv` for the MCP server (`brew install uv`).
 ### Register the MCP server with Claude Code
 
 ```
-claude mcp add vaultlet -- uv run --with mcp python -m vaultlet.mcp_server
+claude mcp add vaultlet --scope user -- \
+  uv run --directory ~/dev/vaultlet --with mcp python -m vaultlet.mcp_server
 ```
 
-Run that from `~/dev/vaultlet` (or add `--directory ~/dev/vaultlet` to the
-command) since `mcp_server` is invoked as a module from the repo root.
-Equivalent `.mcp.json` entry:
+`--directory` makes it cwd-independent, which matters because the MCP server is
+launched from whatever project you're in, not from the repo. `--scope user`
+registers it for every project — match this to the skill, which is also
+user-scope. Equivalent `.mcp.json` entry:
 
 ```json
 {
   "mcpServers": {
     "vaultlet": {
       "command": "uv",
-      "args": ["run", "--with", "mcp", "python", "-m", "vaultlet.mcp_server"],
-      "cwd": "/absolute/path/to/vaultlet"
+      "args": ["run", "--directory", "/absolute/path/to/vaultlet",
+               "--with", "mcp", "python", "-m", "vaultlet.mcp_server"]
     }
   }
 }
