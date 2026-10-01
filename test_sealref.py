@@ -134,7 +134,8 @@ class CommandNameTest(unittest.TestCase):
 
     def test_bin_scripts(self):
         for name in ("sealref", "vaultlet"):
-            r = subprocess.run([os.path.join(self.ROOT, "bin", name), "--help"], capture_output=True, text=True)
+            env = {k: v for k, v in os.environ.items() if k != "SEALREF_PROG"}  # the vaultlet shim sets it in-process
+            r = subprocess.run([os.path.join(self.ROOT, "bin", name), "--help"], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0)
             self.assertIn(f"usage: {name} ", r.stdout)
 
