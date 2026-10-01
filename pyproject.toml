@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sealref"
+version = "0.2.0"
+description = "Keep API keys out of agent transcripts: secret refs, env injection, scrubbed output"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+keyring = ["keyring>=24"]   # Linux Secret Service, Windows Credential Manager
+mcp = ["mcp>=1.0,<2"]
+
+[project.scripts]
+sealref = "sealref.cli:main"
+
+[tool.setuptools]
+packages = ["sealref", "vaultlet"]

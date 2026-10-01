@@ -1,7 +1,7 @@
 # sealref
 
 Keep API keys out of your coding agent's transcript. sealref stores secrets in
-the macOS Keychain and gives agents references (`sealref://stripe/API_KEY`)
+the OS keystore (macOS Keychain, Linux Secret Service, Windows Credential Manager) and gives agents references (`sealref://stripe/API_KEY`)
 instead of values. The value is only ever injected into the environment of a
 child process, and that process's output is scrubbed before the agent sees it.
 
@@ -40,10 +40,43 @@ sealref was called vaultlet. Nothing existing breaks:
 There is no MCP tool and no CLI command that prints a value. That is the
 design; see [Threat model](#threat-model) for what it does and does not buy you.
 
+## Why sealref
+
+**The problem.** To let an agent call an API you paste the key into chat, or
+hand it over some awkward side channel. The key is now in the transcript, the
+provider's logs, the context window re-sent every turn, and often shell history.
+
+**What changes.** You type the value once into a hidden prompt (`sealref set`)
+or the local page (`sealref ui`). The agent only ever holds
+`sealref://stripe/API_KEY`. `sealref run` injects the value into one child
+process's environment and scrubs the child's output, so tool results in the
+transcript carry `«redacted:stripe/API_KEY»` instead of the key.
+
+![demo](demo/demo.png)
+
+Reproduce it with `sh demo/demo.sh` (throwaway group `demo`, fake key
+`sk-demo-FAKE-...`, removed on exit; refuses to run if the group already
+exists). Captured output: [demo/demo-output.txt](demo/demo-output.txt), animation:
+[demo/demo.gif](demo/demo.gif).
+
+**What scrubbing catches, checked against the code and the demo.** Exact
+matches of the raw value, its base64, and its URL-quoted form, in stdout and
+stderr, line by line. So `sealref run ... -- env` prints
+`API_KEY=«redacted:...»`: dumping the environment does not leak.
+
+**What it does not catch.** Any other transform (`echo $API_KEY | rev`, hex,
+a substring or prefix, character-by-character output), a value split across
+lines, anything the command sends over the network, or a command that writes
+the value to a file the agent then reads. An agent that wants the value can
+get it by running such a command, or by reading the Keychain directly as
+your user. sealref prevents accidents and casual leakage; it is not a
+sandbox. Gate `sealref run` behind your agent's permission prompts.
+
 ## Install
 
-Requires macOS and Python 3 (tested on 3.12). The CLI uses only the standard
-library. The MCP server needs `mcp` 1.x, run through `uv` so nothing is
+Requires Python 3 (tested on 3.12). On macOS the CLI uses only the standard
+library; on Linux and Windows install the `keyring` extra
+(`pip install 'sealref[keyring]'`, see [Platforms](#platforms)). The MCP server needs `mcp` 1.x, run through `uv` so nothing is
 installed into your environment.
 
 ```sh
@@ -56,6 +89,7 @@ brew install uv                                              # for the MCP serve
 
 ```sh
 sealref ui                       # open the local page, create a group, add keys
+sealref set stripe API_KEY       # or: hidden prompt (value read from stdin if piped)
 sealref groups
 sealref keys stripe              # key names and refs, no values
 sealref run --group stripe -- sh -c 'echo "key length: ${#API_KEY}"'
@@ -93,6 +127,7 @@ server uses. Tools: `list_groups`, `list_keys`, `has_secret`,
 sealref groups
 sealref keys <group>
 sealref ui [--port N]
+sealref set <group> <key>
 sealref request <group> <key> [--reason TEXT]
 sealref run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 ```
@@ -102,9 +137,30 @@ optionally under another env var name. `run` exits with the child's exit code.
 `run` does not expand `$VARS` itself; wrap in `sh -c` if the command line needs
 them. Group names match `[A-Za-z0-9_.-]+`; key names must be valid env var names.
 
+## Platforms
+
+Storage goes through a small backend interface (`sealref/backends.py`:
+`get`/`set`/`delete` by group and key). Group and key names stay in
+`~/.vaultlet/index.json` on every platform, so the metadata layout is unchanged
+and listing needs no backend support. Items are always service `vaultlet:<group>`,
+account `<key>`. Pick with `SEALREF_BACKEND=macos|keyring`; default is `macos`
+on darwin and `keyring` elsewhere.
+
+| Backend | Platform | Dependency | Status |
+|---|---|---|---|
+| `macos` | macOS Keychain via `security` | none | Exercised for real on macOS 15 / Python 3.12: round-trip test and the demo. |
+| `keyring` | Linux Secret Service (GNOME Keyring, KWallet) | `pip install 'sealref[keyring]'` | Unit-tested against an in-memory fake only. Not run on Linux. |
+| `keyring` | Windows Credential Manager | same | Unit-tested against a fake only. Not run on Windows. Credential Manager caps a value at about 2.5 KB. |
+
+There is deliberately no encrypted-file fallback. Doing it safely needs an
+AEAD and a KDF (not in the standard library) and a passphrase prompt that
+`sealref run` cannot do unattended; plaintext or home-rolled crypto would be
+worse than a clear error. On a headless Linux box without a Secret Service
+daemon, sealref fails with the keyring error rather than degrading.
+
 ## How it works
 
-Values live in the Keychain: service `vaultlet:<group>`, account `<key>`. An
+Values live in the platform keystore (macOS shown): service `vaultlet:<group>`, account `<key>`. An
 index of group and key names (no values) is kept in `~/.vaultlet/index.json`,
 mode 0600. Writes pass the value to `security -i` on stdin, so it does not
 appear in `ps`. The management page binds to 127.0.0.1 only, rejects requests
@@ -134,7 +190,8 @@ wants the value.
 - `request_secret` shows the agent-supplied `reason` text on the page. It is
   escaped, but a misleading reason can still talk you into entering a secret
   you should not. Read it.
-- macOS only. There is no Linux or Windows backend.
+- Non-macOS backends are only as strong as the OS keystore: on Linux an unlocked
+  Secret Service session is readable by any process as your user.
 
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.
 
@@ -162,7 +219,7 @@ See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.
   values to the model put the value in the transcript, which is the case
   sealref exists to avoid.
 
-Do not use sealref if you need Linux or Windows, team sharing, audit logging,
+Do not use sealref if you need team sharing, audit logging,
 rotation, a hardened boundary against a hostile agent, or production secrets.
 
 ## Development
@@ -171,7 +228,7 @@ rotation, a hardened boundary against a hostile agent, or production secrets.
 python3 -m unittest -v test_sealref
 ```
 
-The Keychain round-trip test writes and deletes an item named
+The backend tests use fakes and never touch a real store. The Keychain round-trip test writes and deletes an item named
 `vaultlet:vaultlet-test-integration`. Set `SEALREF_SKIP_KEYCHAIN=1` (or legacy `VAULTLET_SKIP_KEYCHAIN=1`) to skip it.
 
 ## License

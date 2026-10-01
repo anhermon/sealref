@@ -9,7 +9,8 @@ from unittest import mock
 import subprocess
 import sys
 
-from sealref import store
+os.environ.setdefault("SEALREF_BACKEND", "macos")  # existing tests mock `security`
+from sealref import store, backends
 from sealref.cli import _build_needles, _redact_line
 
 
@@ -47,6 +48,70 @@ class SchemeTest(unittest.TestCase):
             run.return_value.stdout = "v\n"
             store._resolve("g", "K")
             self.assertIn("vaultlet:g", run.call_args[0][0])
+
+
+class FakeKeyring:
+    """In-memory stand-in for the `keyring` module (never touches a real store)."""
+    def __init__(self):
+        self.d = {}
+    def get_password(self, svc, user):
+        return self.d.get((svc, user))
+    def set_password(self, svc, user, pw):
+        self.d[(svc, user)] = pw
+    def delete_password(self, svc, user):
+        if (svc, user) not in self.d:
+            raise KeyError("absent")
+        del self.d[(svc, user)]
+
+
+class BackendTest(unittest.TestCase):
+    def test_keyring_roundtrip_and_service_name(self):
+        kr = FakeKeyring()
+        b = backends.Keyring(kr)
+        b.set("g", "K", 'v"al\\ue')
+        self.assertIn(("vaultlet:g", "K"), kr.d)  # same naming as the Keychain backend
+        self.assertEqual(b.get("g", "K"), 'v"al\\ue')
+        b.delete("g", "K")
+        b.delete("g", "K")  # idempotent
+        with self.assertRaises(KeyError):
+            b.get("g", "K")
+
+    def test_keyring_write_error_does_not_leak_value(self):
+        kr = mock.Mock()
+        kr.set_password.side_effect = RuntimeError("boom sk-leak")
+        with self.assertRaises(RuntimeError) as c:
+            backends.Keyring(kr).set("g", "K", "sk-leak")
+        self.assertNotIn("sk-leak", str(c.exception))
+
+    def test_keyring_missing_lib_message(self):
+        with mock.patch.dict(sys.modules, {"keyring": None}):
+            with self.assertRaisesRegex(RuntimeError, r"sealref\[keyring\]"):
+                backends.Keyring()
+
+    def test_selection(self):
+        with mock.patch.dict(os.environ, {"SEALREF_BACKEND": "macos"}):
+            self.assertIsInstance(backends.get_backend(), backends.MacKeychain)
+        with mock.patch.dict(os.environ, {"SEALREF_BACKEND": "nope"}):
+            with self.assertRaises(ValueError):
+                backends.get_backend()
+        env = {k: v for k, v in os.environ.items() if k != "SEALREF_BACKEND"}
+        for plat, want in (("darwin", "macos"), ("linux", "keyring"), ("win32", "keyring")):
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", plat), \
+                 mock.patch.object(backends, "Keyring", lambda: type("K", (), {"name": "keyring"})()):
+                self.assertEqual(backends.get_backend().name, want)
+
+    def test_store_end_to_end_with_keyring_backend(self):
+        kr = FakeKeyring()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        with mock.patch.multiple(store, VAULT_DIR=tmp, INDEX_PATH=os.path.join(tmp, "index.json")), \
+             mock.patch.object(store, "get_backend", lambda: backends.Keyring(kr)):
+            store.set_secret("kg", "API_KEY", "sk-fake-value")
+            self.assertEqual(store._resolve("kg", "API_KEY"), "sk-fake-value")
+            self.assertEqual(store._resolve_group("kg"), {"API_KEY": "sk-fake-value"})
+            store.delete_group("kg")
+            self.assertEqual(kr.d, {})
+            self.assertNotIn("kg", store.list_groups())
 
 
 class CommandNameTest(unittest.TestCase):

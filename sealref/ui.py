@@ -219,7 +219,7 @@ PAGE = """<!doctype html>
 <body>
 <main>
   <h1>sealref</h1>
-  <div class="sub">Secrets live in the macOS Keychain. Values never leave this page.</div>
+  <div class="sub">Secrets live in your OS keystore. Values never leave this page.</div>
   <div id="banner"></div>
   <div class="new-group">
     <input id="new-group-name" type="text" placeholder="new group name">

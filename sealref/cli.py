@@ -19,6 +19,7 @@ commands:
   groups
   keys <group>
   ui [--port N]
+  set <group> <key>      (hidden prompt; or pipe the value on stdin)
   request <group> <key> [--reason TEXT]
   run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 
@@ -73,6 +74,20 @@ def cmd_keys(rest):
     group = rest[0]
     for key in store.list_keys(group):
         print(f"{key}  {store.ref(group, key)}")
+    return 0
+
+
+def cmd_set(rest):
+    if len(rest) != 2:
+        print(f"{PROG}: usage: {PROG} set <group> <key>", file=sys.stderr)
+        return 2
+    group, key = rest
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass(f"value for {group}/{key} (hidden): ")
+    else:
+        value = sys.stdin.read().rstrip("\n")  # piped: keeps the value out of argv and history
+    print(store.set_secret(group, key, value))
     return 0
 
 
@@ -206,6 +221,7 @@ def cmd_run(rest):
 COMMANDS = {
     "groups": cmd_groups,
     "keys": cmd_keys,
+    "set": cmd_set,
     "ui": cmd_ui,
     "request": cmd_request,
     "run": cmd_run,
