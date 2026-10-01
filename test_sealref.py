@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-from vaultlet import store
-from vaultlet.cli import _build_needles, _redact_line
+import subprocess
+import sys
+
+from sealref import store
+from sealref.cli import _build_needles, _redact_line
 
 
 class RefTest(unittest.TestCase):
@@ -20,6 +23,74 @@ class RefTest(unittest.TestCase):
         for bad in ["not-a-ref", "vaultlet://onlygroup", "http://g/k", "vaultlet://g/k/extra", ""]:
             with self.assertRaises(ValueError):
                 store.parse_ref(bad)
+
+
+class SchemeTest(unittest.TestCase):
+    def test_accepts_both_schemes(self):
+        for scheme in ("sealref", "vaultlet"):
+            self.assertEqual(store.parse_ref(f"{scheme}://g/K"), ("g", "K"))
+        with self.assertRaises(ValueError):
+            store.parse_ref("other://g/K")
+
+    def test_output_default_legacy_and_env_switch(self):
+        with mock.patch.dict(os.environ, clear=False):
+            os.environ.pop("SEALREF_REF_SCHEME", None)
+            self.assertEqual(store.ref("g", "K"), "vaultlet://g/K")
+            os.environ["SEALREF_REF_SCHEME"] = "sealref"
+            self.assertEqual(store.ref("g", "K"), "sealref://g/K")
+            os.environ["SEALREF_REF_SCHEME"] = "bogus"
+            with self.assertRaises(ValueError):
+                store.ref("g", "K")
+
+    def test_keychain_service_name_unchanged(self):
+        with mock.patch("sealref.store.subprocess.run") as run:
+            run.return_value.stdout = "v\n"
+            store._resolve("g", "K")
+            self.assertIn("vaultlet:g", run.call_args[0][0])
+
+
+class CommandNameTest(unittest.TestCase):
+    """Both entry points work; the ref scheme in `run --ref` works either way."""
+
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+
+    def _run(self, *args, env=None):
+        e = {**os.environ, "PYTHONPATH": self.ROOT, **(env or {})}
+        e.pop("SEALREF_PROG", None)
+        e.pop("SEALREF_REF_SCHEME", None)
+        e.update(env or {})
+        return subprocess.run([sys.executable, *args], capture_output=True, text=True, env=e)
+
+    def test_both_module_names_print_usage(self):
+        for mod, prog in (("sealref", "sealref"), ("vaultlet", "vaultlet")):
+            r = self._run("-m", mod, "--help")
+            self.assertEqual(r.returncode, 0)
+            self.assertIn(f"usage: {prog} ", r.stdout)
+
+    def test_bin_scripts(self):
+        for name in ("sealref", "vaultlet"):
+            r = subprocess.run([os.path.join(self.ROOT, "bin", name), "--help"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn(f"usage: {name} ", r.stdout)
+
+    def test_ref_scheme_flag(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SEALREF_REF_SCHEME", None)
+            from sealref import cli
+            with mock.patch.object(cli, "COMMANDS", {"x": lambda rest: print(store.ref("g", "K")) or 0}):
+                import io, contextlib
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    cli.main(["--ref-scheme", "sealref", "x"])
+                self.assertEqual(buf.getvalue().strip(), "sealref://g/K")
+
+    def test_mcp_alias_module_importable(self):
+        try:
+            import mcp  # noqa: F401
+        except ImportError:
+            self.skipTest("mcp not installed")
+        r = self._run("-c", "import vaultlet.mcp_server as v, sealref.mcp_server as s; print(v.mcp.name, s.mcp is v.mcp)")
+        self.assertEqual(r.stdout.split()[1], "True")
 
 
 class NameValidationTest(unittest.TestCase):
@@ -43,14 +114,14 @@ class NameValidationTest(unittest.TestCase):
         store.create_group("my-group_1.0")
         self.assertIn("my-group_1.0", store.list_groups())
 
-    @mock.patch("vaultlet.store.subprocess.run")
+    @mock.patch("sealref.store.subprocess.run")
     def test_set_secret_rejects_bad_key(self, mock_run):
         for bad in ["1starts_with_digit", "has-dash", "has space", ""]:
             with self.assertRaises(ValueError):
                 store.set_secret("g", bad, "value")
         mock_run.assert_not_called()
 
-    @mock.patch("vaultlet.store.subprocess.run")
+    @mock.patch("sealref.store.subprocess.run")
     def test_set_secret_accepts_good_key(self, mock_run):
         mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         r = store.set_secret("g", "API_KEY", "secretvalue")
@@ -61,7 +132,7 @@ class NameValidationTest(unittest.TestCase):
         self.assertNotIn("secretvalue", " ".join(argv))  # never in argv
         self.assertIn('-w "secretvalue"', mock_run.call_args[1]["input"])
 
-    @mock.patch("vaultlet.store.subprocess.run")
+    @mock.patch("sealref.store.subprocess.run")
     def test_set_secret_escapes_and_rejects(self, mock_run):
         mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         store.set_secret("g", "K", 'a"b\\c')
@@ -155,7 +226,7 @@ class RedactionFilterTest(unittest.TestCase):
 class UiGuardTest(unittest.TestCase):
     def setUp(self):
         import threading
-        from vaultlet import ui
+        from sealref import ui
         self.tmpdir = tempfile.mkdtemp()
         self._patch = mock.patch.multiple(
             store, VAULT_DIR=self.tmpdir, INDEX_PATH=os.path.join(self.tmpdir, "index.json")
@@ -207,11 +278,11 @@ class GetSecretIntegrationTest(unittest.TestCase):
     """Real keychain round trip, cleaned up in tearDown. Skipped if `security`
     is unavailable (non-macOS)."""
 
-    GROUP = "vaultlet-test-integration"
+    GROUP = "sealref-test-integration"
     KEY = "TEST_KEY"
 
     def setUp(self):
-        if shutil.which("security") is None or os.environ.get("VAULTLET_SKIP_KEYCHAIN"):
+        if shutil.which("security") is None or (os.environ.get("VAULTLET_SKIP_KEYCHAIN") or os.environ.get("SEALREF_SKIP_KEYCHAIN")):
             self.skipTest("no usable keychain (not macOS, or VAULTLET_SKIP_KEYCHAIN set)")
         self.tmpdir = tempfile.mkdtemp()
         self._patch = mock.patch.multiple(

@@ -26,7 +26,7 @@ def _group_view(group):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "vaultlet/1"
+    server_version = "sealref/1"
 
     def log_message(self, fmt, *args):
         pass  # Known limit: silence default access log, personal tool
@@ -124,7 +124,7 @@ def _make_server(port):
 def serve(port=8765):
     server = _make_server(port)
     url = f"http://127.0.0.1:{server.server_port}/"
-    print(f"vaultlet: serving on {url}")
+    print(f"sealref: serving on {url}")
     webbrowser.open(url)
     try:
         server.serve_forever(poll_interval=0.2)
@@ -141,7 +141,7 @@ def serve_until(group, key, reason, timeout=300):
     if reason:
         q += f"&reason={quote(reason)}"
     url = f"http://127.0.0.1:{server.server_port}/{q}"
-    print(f"vaultlet: serving on {url}")
+    print(f"sealref: serving on {url}")
     webbrowser.open(url)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
     thread.start()
@@ -163,7 +163,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vaultlet</title>
+<title>sealref</title>
 <style>
   :root {
     --bg: #f7f7f5; --panel: #fff; --text: #1c1c1c; --muted: #6b6b6b;
@@ -218,7 +218,7 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <main>
-  <h1>vaultlet</h1>
+  <h1>sealref</h1>
   <div class="sub">Secrets live in the macOS Keychain. Values never leave this page.</div>
   <div id="banner"></div>
   <div class="new-group">

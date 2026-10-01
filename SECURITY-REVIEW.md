@@ -13,14 +13,14 @@ This is a self-review, not an audit.
 | 4 | `DELETE /api/groups/<g>` and `/api/keys/<g>/<k>` did not validate names or URL-decode the path. | Names validated in `store.delete` and `store.delete_group`; path segments unquoted. |
 | 5 | `request` built the browser URL from unquoted group and key. | Quoted; key validated. |
 | 6 | `~/.vaultlet` created with default umask (0755). | Created 0700. (The index inside was already 0600.) |
-| 7 | `vaultlet run` crashed on non-UTF-8 child output and left the child running on Ctrl-C. | `errors="replace"`; terminate on interrupt. |
+| 7 | `sealref run` crashed on non-UTF-8 child output and left the child running on Ctrl-C. | `errors="replace"`; terminate on interrupt. |
 
 ## Open, by design (see README threat model)
 
-- The agent selects the command run under `vaultlet run`, so it can print or
+- The agent selects the command run under `sealref run`, so it can print or
   exfiltrate the value (`echo $K | rev`, `curl -d "$K"`). Redaction is a guard
   against accident. Mitigation outside this tool: require approval for
-  `vaultlet run` in the agent's permission settings.
+  `sealref run` in the agent's permission settings.
 - Same-user processes can read the Keychain item directly.
 - Redaction is line-buffered and covers raw, base64 and URL-quoted forms only.
 - `request_secret` returns as soon as `store.has` is true, so requesting a key
@@ -28,7 +28,7 @@ This is a self-review, not an audit.
   checked against the index, not the Keychain, so a manually deleted Keychain
   item still reports as present.
 - A misleading `reason` in `request_secret` can socially engineer the user.
-- The UI port is predictable (`vaultlet ui` defaults to 8765); `request` uses a
+- The UI port is predictable (`sealref ui` defaults to 8765); `request` uses a
   random port. Any local process can connect to it; the guards above stop
   browsers, not other local programs.
 - `list_keys` / `has_secret` disclose which services you have credentials for.
@@ -37,3 +37,11 @@ This is a self-review, not an audit.
 
 The MCP server logs to stderr only; the web server's access log is disabled. No
 code path logs values. The only value-bearing path is stdin to `security -i`.
+
+## Rename to sealref
+
+Both ref schemes parse through one anchored regex (`^(?:sealref|vaultlet)://...`)
+followed by the same group and key validation, so the accepted input surface is
+unchanged. Storage names (Keychain service `vaultlet:<group>`, `~/.vaultlet`)
+were deliberately not changed, so no secret is moved or re-written. The legacy
+`vaultlet` package is a thin shim over `sealref` and adds no code paths that read values.

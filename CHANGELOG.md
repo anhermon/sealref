@@ -2,12 +2,20 @@
 
 ## Unreleased
 
+- Renamed to **sealref**. New primary command `sealref` and ref scheme
+  `sealref://group/key`. Fully backward compatible: the `vaultlet` command,
+  `python -m vaultlet[.mcp_server]` and `vaultlet://` refs work unchanged; both
+  schemes are accepted everywhere. Refs print as `vaultlet://` unless
+  `SEALREF_REF_SCHEME=sealref` or `--ref-scheme sealref` is set. Keychain service
+  (`vaultlet:<group>`) and `~/.vaultlet` are unchanged (no migration).
+  MCP tool names unchanged; server name is `sealref`, or `vaultlet` via the alias.
+  `SEALREF_SKIP_KEYCHAIN` added next to `VAULTLET_SKIP_KEYCHAIN`.
 - Keychain writes now pass the value to `security -i` on stdin instead of argv,
   so it no longer shows up in `ps`. Values with newlines or NUL are rejected.
 - Local page: reject requests with a foreign `Host` (DNS rebinding) or `Origin`,
   and require a custom header on POST and DELETE (CSRF). Fixed unescaped
   query parameters in the page, and validate group and key names on delete.
-- `vaultlet run`: tolerate non-UTF-8 child output, terminate the child on Ctrl-C.
+- `sealref run`: tolerate non-UTF-8 child output, terminate the child on Ctrl-C.
 - `~/.vaultlet` is created with mode 0700.
 - Docs: new README, threat model, security review, MIT license.
 

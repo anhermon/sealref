@@ -10,6 +10,6 @@ jobs:
           python-version: "3.12"
       # The runner's keychain is not guaranteed to be unlocked; the real
       # keychain round-trip test is skipped here and run locally.
-      - run: python -m unittest -v test_vaultlet
+      - run: python -m unittest -v test_sealref
         env:
-          VAULTLET_SKIP_KEYCHAIN: "1"
+          SEALREF_SKIP_KEYCHAIN: "1"

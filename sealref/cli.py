@@ -1,23 +1,30 @@
 """CLI entry points."""
 import base64
+import os
 import subprocess
 import sys
 import urllib.parse
 
 from . import store
 
+PROG = os.environ.get("SEALREF_PROG", "sealref")  # "vaultlet" when run via the legacy command
+
 REDACT_MIN_LEN = 4
 DEFAULT_PORT = 8765
 DEFAULT_TIMEOUT = 300
 
-USAGE = """usage: vaultlet <command> [args...]
+USAGE = """usage: {prog} <command> [args...]
 
 commands:
   groups
   keys <group>
   ui [--port N]
   request <group> <key> [--reason TEXT]
-  run [--group G]... [--ref vaultlet://g/k[=ENVNAME]]... -- <cmd> [args...]
+  run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
+
+refs: sealref://group/key and legacy vaultlet://group/key are both accepted.
+Output refs default to vaultlet://; use --ref-scheme sealref (before the
+command) or SEALREF_REF_SCHEME=sealref to print sealref://.
 """
 
 
@@ -29,7 +36,7 @@ def _build_needles(secrets):
     for group, key, value in secrets:
         if len(value) < REDACT_MIN_LEN:
             print(
-                f"vaultlet: warning: value for {group}/{key} is shorter than "
+                f"{PROG}: warning: value for {group}/{key} is shorter than "
                 f"{REDACT_MIN_LEN} chars, not redacting",
                 file=sys.stderr,
             )
@@ -61,7 +68,7 @@ def cmd_groups(rest):
 
 def cmd_keys(rest):
     if len(rest) != 1:
-        print("vaultlet: usage: vaultlet keys <group>", file=sys.stderr)
+        print(f"{PROG}: usage: {PROG} keys <group>", file=sys.stderr)
         return 2
     group = rest[0]
     for key in store.list_keys(group):
@@ -79,7 +86,7 @@ def cmd_ui(rest):
     try:
         from .ui import serve
     except ImportError:
-        print("vaultlet: ui.py not implemented yet", file=sys.stderr)
+        print(f"{PROG}: ui.py not implemented yet", file=sys.stderr)
         return 1
     serve(port=port)
     return 0
@@ -100,17 +107,17 @@ def cmd_request(rest):
             positional.append(a)
         i += 1
     if len(positional) != 2:
-        print("vaultlet: usage: vaultlet request <group> <key> [--reason TEXT]", file=sys.stderr)
+        print(f"{PROG}: usage: {PROG} request <group> <key> [--reason TEXT]", file=sys.stderr)
         return 2
     group, key = positional
     try:
         from .ui import serve_until
     except ImportError:
-        print("vaultlet: ui.py not implemented yet", file=sys.stderr)
+        print(f"{PROG}: ui.py not implemented yet", file=sys.stderr)
         return 1
     ok = serve_until(group, key, reason, timeout=DEFAULT_TIMEOUT)
     if not ok:
-        print("vaultlet: timed out waiting for secret", file=sys.stderr)
+        print(f"{PROG}: timed out waiting for secret", file=sys.stderr)
         return 1
     print(store.ref(group, key))
     return 0
@@ -149,7 +156,7 @@ def cmd_run(rest):
     try:
         groups, refs, child_cmd = _parse_run_args(rest)
     except ValueError as e:
-        print(f"vaultlet: {e}", file=sys.stderr)
+        print(f"{PROG}: {e}", file=sys.stderr)
         return 2
 
     import os
@@ -208,16 +215,23 @@ COMMANDS = {
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv or argv[0] in ("-h", "--help"):
-        print(USAGE, end="")
+        print(USAGE.format(prog=PROG), end="")
         return 0 if argv and argv[0] in ("-h", "--help") else 2
+    if argv[0] == "--ref-scheme" and len(argv) > 1:
+        os.environ["SEALREF_REF_SCHEME"], argv = argv[1], argv[2:]
+    elif argv[0].startswith("--ref-scheme="):
+        os.environ["SEALREF_REF_SCHEME"], argv = argv[0].split("=", 1)[1], argv[1:]
+    if not argv:
+        print(USAGE.format(prog=PROG), end="", file=sys.stderr)
+        return 2
     cmd, rest = argv[0], argv[1:]
     handler = COMMANDS.get(cmd)
     if handler is None:
-        print(f"vaultlet: unknown command {cmd!r}\n", file=sys.stderr)
-        print(USAGE, end="", file=sys.stderr)
+        print(f"{PROG}: unknown command {cmd!r}\n", file=sys.stderr)
+        print(USAGE.format(prog=PROG), end="", file=sys.stderr)
         return 2
     try:
         return handler(rest)
     except ValueError as e:
-        print(f"vaultlet: {e}", file=sys.stderr)
+        print(f"{PROG}: {e}", file=sys.stderr)
         return 2

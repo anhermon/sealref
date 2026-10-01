@@ -1,4 +1,7 @@
-"""Index (~/.vaultlet/index.json) + macOS Keychain storage. """
+"""Index (~/.vaultlet/index.json) + macOS Keychain storage.
+
+Storage names stay "vaultlet" (dir ~/.vaultlet, Keychain service "vaultlet:<group>")
+so existing installs need no migration."""
 import json
 import os
 import re
@@ -64,14 +67,22 @@ def create_group(group: str) -> None:
     _save_index(index)
 
 
+SCHEMES = ("sealref", "vaultlet")
+
+
 def ref(group: str, key: str) -> str:
-    return f"vaultlet://{group}/{key}"
+    # Default output stays vaultlet:// so existing tools keep working;
+    # SEALREF_REF_SCHEME=sealref (or --ref-scheme sealref) switches it.
+    scheme = os.environ.get("SEALREF_REF_SCHEME", "vaultlet")
+    if scheme not in SCHEMES:
+        raise ValueError(f"SEALREF_REF_SCHEME must be one of {SCHEMES}, got {scheme!r}")
+    return f"{scheme}://{group}/{key}"
 
 
 def parse_ref(s: str) -> tuple:
-    m = re.match(r"^vaultlet://([^/]+)/([^/]+)$", s)
+    m = re.match(r"^(?:sealref|vaultlet)://([^/]+)/([^/]+)$", s)
     if not m:
-        raise ValueError(f"not a vaultlet ref: {s!r}")
+        raise ValueError(f"not a sealref/vaultlet ref: {s!r}")
     group, key = m.group(1), m.group(2)
     _validate_group(group)
     _validate_key(key)
