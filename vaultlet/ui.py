@@ -1,4 +1,4 @@
-"""Local-only web UI. Stdlib http.server only. See CONTRACT.md's ## UI section.
+"""Local-only web UI. Stdlib http.server only.
 
 No route ever returns a secret value. store.py's value-reading functions
 (_resolve, _resolve_group) are never imported here.
@@ -8,7 +8,7 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from . import store
 
@@ -29,7 +29,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "vaultlet/1"
 
     def log_message(self, fmt, *args):
-        pass  # ponytail: silence default access log, personal tool
+        pass  # Known limit: silence default access log, personal tool
 
     def _json(self, status, payload):
         body = json.dumps(payload).encode()
@@ -52,7 +52,23 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw or b"{}")
 
+    def _allowed(self):
+        """Reject DNS-rebinding (bad Host) and cross-site requests (bad Origin,
+        non-JSON bodies). Everything here is local-only, so be strict."""
+        port = self.server.server_port
+        hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.headers.get("Host") not in hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in {f"http://{h}" for h in hosts}:
+            return False
+        if self.command in ("POST", "DELETE") and self.headers.get("X-Vaultlet") != "1":
+            return False  # custom header forces a CORS preflight, which we never grant
+        return True
+
     def do_GET(self):
+        if not self._allowed():
+            return self._json(403, {"error": "forbidden"})
         path = urlparse(self.path).path
         if path == "/":
             self._html(PAGE)
@@ -62,6 +78,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._allowed():
+            return self._json(403, {"error": "forbidden"})
         path = urlparse(self.path).path
         if path == "/api/quit":
             self._json(200, {"ok": True})
@@ -77,11 +95,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True})
             else:
                 self._json(404, {"error": "not found"})
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, TypeError) as e:
             self._json(400, {"error": str(e)})
+        except RuntimeError as e:
+            self._json(500, {"error": str(e)})
 
     def do_DELETE(self):
-        parts = urlparse(self.path).path.strip("/").split("/")
+        if not self._allowed():
+            return self._json(403, {"error": "forbidden"})
+        parts = [unquote(p) for p in urlparse(self.path).path.strip("/").split("/")]
         try:
             if parts[:1] == ["api"] and parts[1:2] == ["groups"] and len(parts) == 3:
                 store.delete_group(parts[2])
@@ -111,12 +133,12 @@ def serve(port=8765):
 
 
 def serve_until(group, key, reason, timeout=300):
+    store._validate_key(key)
     if group not in store.list_groups():
         store.create_group(group)  # raises ValueError on a bad name, propagates
     server = _make_server(0)
-    q = f"?group={group}&key={key}"
+    q = f"?group={quote(group)}&key={quote(key)}"
     if reason:
-        from urllib.parse import quote
         q += f"&reason={quote(reason)}"
     url = f"http://127.0.0.1:{server.server_port}/{q}"
     print(f"vaultlet: serving on {url}")
@@ -231,7 +253,7 @@ function toast(msg, isErr) {
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: body ? {'Content-Type': 'application/json'} : undefined,
+    headers: body ? {'Content-Type': 'application/json', 'X-Vaultlet': '1'} : {'X-Vaultlet': '1'},
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -260,7 +282,8 @@ function render(groups) {
     el.appendChild(renderGroup(g));
   }
   if (focusGroup && focusKey) {
-    const input = document.querySelector(`input[data-focus="${focusGroup}/${focusKey}"]`);
+    const input = [...document.querySelectorAll('input[data-focus]')]
+      .find(i => i.dataset.focus === focusGroup + '/' + focusKey);
     if (input) { input.focus(); input.scrollIntoView({block: 'center'}); }
   }
 }
@@ -308,7 +331,7 @@ function renderGroup(g) {
   addRow.innerHTML = `
     <input type="text" placeholder="key name" class="key-input" value="${isFocus && focusKey ? escapeHtml(focusKey) : ''}">
     <span class="pw-wrap">
-      <input type="password" placeholder="value" class="val-input" ${isFocus ? `data-focus="${g.name}/${focusKey}"` : ''}>
+      <input type="password" placeholder="value" class="val-input" ${isFocus ? `data-focus="${escapeHtml(g.name + '/' + focusKey)}"` : ''}>
       <button type="button" class="show-btn">show</button>
     </span>
     <button class="primary add-btn">Save</button>

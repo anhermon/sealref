@@ -52,15 +52,29 @@ class NameValidationTest(unittest.TestCase):
 
     @mock.patch("vaultlet.store.subprocess.run")
     def test_set_secret_accepts_good_key(self, mock_run):
-        mock_run.return_value = mock.Mock(returncode=0)
+        mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         r = store.set_secret("g", "API_KEY", "secretvalue")
         self.assertEqual(r, "vaultlet://g/API_KEY")
         self.assertIn("API_KEY", store.list_keys("g"))
-        args = mock_run.call_args[0][0]
-        self.assertEqual(
-            args,
-            ["security", "add-generic-password", "-a", "API_KEY", "-s", "vaultlet:g", "-w", "secretvalue", "-U"],
-        )
+        argv = mock_run.call_args[0][0]
+        self.assertEqual(argv, ["security", "-i"])
+        self.assertNotIn("secretvalue", " ".join(argv))  # never in argv
+        self.assertIn('-w "secretvalue"', mock_run.call_args[1]["input"])
+
+    @mock.patch("vaultlet.store.subprocess.run")
+    def test_set_secret_escapes_and_rejects(self, mock_run):
+        mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        store.set_secret("g", "K", 'a"b\\c')
+        self.assertIn('-w "a\\"b\\\\c"', mock_run.call_args[1]["input"])
+        for bad in ["", "a\nb", "a\0b"]:
+            with self.assertRaises(ValueError):
+                store.set_secret("g", "K", bad)
+
+    def test_delete_validates_names(self):
+        with self.assertRaises(ValueError):
+            store.delete("g", "../x")
+        with self.assertRaises(ValueError):
+            store.delete_group("a b")
 
 
 class IndexAtomicWriteTest(unittest.TestCase):
@@ -138,6 +152,57 @@ class RedactionFilterTest(unittest.TestCase):
         self.assertNotIn(quoted, out_quoted)
 
 
+class UiGuardTest(unittest.TestCase):
+    def setUp(self):
+        import threading
+        from vaultlet import ui
+        self.tmpdir = tempfile.mkdtemp()
+        self._patch = mock.patch.multiple(
+            store, VAULT_DIR=self.tmpdir, INDEX_PATH=os.path.join(self.tmpdir, "index.json")
+        )
+        self._patch.start()
+        self.server = ui._make_server(0)
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self._patch.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _req(self, method, path, body=None, headers=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port)
+        h = {"Host": f"127.0.0.1:{self.port}", "X-Vaultlet": "1"}
+        h.update(headers or {})
+        h = {k: v for k, v in h.items() if v is not None}
+        c.request(method, path, body=body, headers=h)
+        r = c.getresponse()
+        r.read()
+        return r.status
+
+    def test_same_origin_ok(self):
+        self.assertEqual(self._req("GET", "/api/groups"), 200)
+        self.assertEqual(self._req("POST", "/api/groups", '{"group":"ok"}'), 200)
+        self.assertIn("ok", store.list_groups())
+
+    def test_rebinding_host_rejected(self):
+        self.assertEqual(self._req("GET", "/api/groups", headers={"Host": "evil.example"}), 403)
+
+    def test_cross_origin_rejected(self):
+        self.assertEqual(
+            self._req("POST", "/api/groups", '{"group":"x"}', {"Origin": "http://evil.example"}), 403)
+        self.assertNotIn("x", store.list_groups())
+
+    def test_missing_custom_header_rejected(self):
+        self.assertEqual(self._req("POST", "/api/groups", '{"group":"x"}', {"X-Vaultlet": None}), 403)
+        self.assertEqual(self._req("POST", "/api/quit", "{}", {"X-Vaultlet": None}), 403)
+
+    def test_delete_bad_name_is_400(self):
+        self.assertEqual(self._req("DELETE", "/api/groups/a%20b"), 400)
+
+
 class GetSecretIntegrationTest(unittest.TestCase):
     """Real keychain round trip, cleaned up in tearDown. Skipped if `security`
     is unavailable (non-macOS)."""
@@ -146,8 +211,8 @@ class GetSecretIntegrationTest(unittest.TestCase):
     KEY = "TEST_KEY"
 
     def setUp(self):
-        if shutil.which("security") is None:
-            self.skipTest("no `security` binary (not macOS)")
+        if shutil.which("security") is None or os.environ.get("VAULTLET_SKIP_KEYCHAIN"):
+            self.skipTest("no usable keychain (not macOS, or VAULTLET_SKIP_KEYCHAIN set)")
         self.tmpdir = tempfile.mkdtemp()
         self._patch = mock.patch.multiple(
             store, VAULT_DIR=self.tmpdir, INDEX_PATH=os.path.join(self.tmpdir, "index.json")
@@ -163,9 +228,9 @@ class GetSecretIntegrationTest(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_set_resolve_delete_round_trip(self):
-        store.set_secret(self.GROUP, self.KEY, "integration-test-value")
+        store.set_secret(self.GROUP, self.KEY, 'integration "test" \\value')
         self.assertTrue(store.has(self.GROUP, self.KEY))
-        self.assertEqual(store._resolve(self.GROUP, self.KEY), "integration-test-value")
+        self.assertEqual(store._resolve(self.GROUP, self.KEY), 'integration "test" \\value')
         store.delete(self.GROUP, self.KEY)
         self.assertFalse(store.has(self.GROUP, self.KEY))
 

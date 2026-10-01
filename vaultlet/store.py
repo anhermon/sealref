@@ -1,4 +1,4 @@
-"""Index (~/.vaultlet/index.json) + macOS Keychain storage. See CONTRACT.md."""
+"""Index (~/.vaultlet/index.json) + macOS Keychain storage. """
 import json
 import os
 import re
@@ -30,7 +30,7 @@ def _load_index() -> dict:
 
 
 def _save_index(index: dict) -> None:
-    os.makedirs(VAULT_DIR, exist_ok=True)
+    os.makedirs(VAULT_DIR, mode=0o700, exist_ok=True)
     tmp_path = INDEX_PATH + ".tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -81,14 +81,16 @@ def parse_ref(s: str) -> tuple:
 def set_secret(group: str, key: str, value: str) -> str:
     _validate_group(group)
     _validate_key(key)
-    # ponytail: value is briefly visible in `ps` output of the `security` child
-    # process (argv is world-readable on most systems). Acceptable for a
-    # personal utility; upgrade to a stdin-fed helper if that ever matters.
-    subprocess.run(
-        ["security", "add-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w", value, "-U"],
-        check=True,
-        capture_output=True,
-    )
+    if not value or any(c in value for c in "\n\r\0"):
+        raise ValueError("value must be non-empty and contain no newline or NUL")
+    # The value goes to `security -i` on stdin, not argv, so it never appears
+    # in `ps` output. security's command parser takes double-quoted strings
+    # with backslash escapes. Limit: values containing newlines are rejected.
+    esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
+    cmd = f'add-generic-password -a "{esc(key)}" -s "vaultlet:{esc(group)}" -w "{esc(value)}" -U\n'
+    r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True)
+    if r.returncode != 0 or "returned -" in r.stdout + r.stderr:
+        raise RuntimeError("keychain write failed (security exit %d)" % r.returncode)
     index = _load_index()
     index["groups"].setdefault(group, {"keys": {}})
     index["groups"][group]["keys"][key] = {
@@ -99,6 +101,8 @@ def set_secret(group: str, key: str, value: str) -> str:
 
 
 def delete(group: str, key: str) -> None:
+    _validate_group(group)
+    _validate_key(key)
     subprocess.run(
         ["security", "delete-generic-password", "-a", key, "-s", f"vaultlet:{group}"],
         capture_output=True,
@@ -110,6 +114,7 @@ def delete(group: str, key: str) -> None:
 
 
 def delete_group(group: str) -> None:
+    _validate_group(group)
     for key in list_keys(group):
         delete(group, key)
     index = _load_index()

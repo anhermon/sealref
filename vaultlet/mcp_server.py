@@ -1,4 +1,4 @@
-"""MCP server exposing vaultlet to agents over stdio. See CONTRACT.md.
+"""MCP server exposing vaultlet to agents over stdio.
 
 HARD RULE: nothing here may ever write to stdout -- stdout is the JSON-RPC
 transport for FastMCP's stdio mode. All logging/diagnostics go to stderr.

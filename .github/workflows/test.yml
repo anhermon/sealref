@@ -1,0 +1,15 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The runner's keychain is not guaranteed to be unlocked; the real
+      # keychain round-trip test is skipped here and run locally.
+      - run: python -m unittest -v test_vaultlet
+        env:
+          VAULTLET_SKIP_KEYCHAIN: "1"

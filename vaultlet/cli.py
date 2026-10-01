@@ -1,4 +1,4 @@
-"""CLI entry points. See CONTRACT.md for the exact command surface."""
+"""CLI entry points."""
 import base64
 import subprocess
 import sys
@@ -72,7 +72,10 @@ def cmd_keys(rest):
 def cmd_ui(rest):
     port = DEFAULT_PORT
     if "--port" in rest:
-        port = int(rest[rest.index("--port") + 1])
+        try:
+            port = int(rest[rest.index("--port") + 1])
+        except (IndexError, ValueError):
+            raise ValueError("--port requires an integer")
     try:
         from .ui import serve
     except ImportError:
@@ -90,6 +93,8 @@ def cmd_request(rest):
         a = rest[i]
         if a == "--reason":
             i += 1
+            if i >= len(rest):
+                raise ValueError("--reason requires an argument")
             reason = rest[i]
         else:
             positional.append(a)
@@ -166,7 +171,7 @@ def cmd_run(rest):
 
     needles = _build_needles(secrets)
 
-    # ponytail: line-buffered redaction. A value split across a line boundary,
+    # Known limit: line-buffered redaction. A value split across a line boundary,
     # or emitted without a trailing newline right at a read chunk edge, can
     # slip through unredacted. Upgrade to a rolling-buffer scanner if that
     # ever bites for this personal tool.
@@ -176,12 +181,18 @@ def cmd_run(rest):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        errors="replace",
         bufsize=1,
     )
-    for line in proc.stdout:
-        sys.stdout.write(_redact_line(line, needles))
-        sys.stdout.flush()
-    proc.wait()
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(_redact_line(line, needles))
+            sys.stdout.flush()
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait()
+        return 130
     return proc.returncode
 
 
