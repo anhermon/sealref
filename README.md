@@ -1,44 +1,66 @@
 # sealref
 
-Keep API keys out of your coding agent's transcript. sealref stores secrets in
-the macOS Keychain and gives agents references (`sealref://stripe/API_KEY`)
-instead of values. The value is only ever injected into the environment of a
-child process, and that process's output is scrubbed before the agent sees it.
+A local, macOS Keychain-backed secret store for AI coding agents: the agent
+works with references like `sealref://stripe/API_KEY`, and the key itself stays
+out of the chat.
 
-## Renamed from vaultlet (compatibility)
+## Why
 
-sealref was called vaultlet. Nothing existing breaks:
+When an agent needs an API token, the quickest thing to do is paste it into the
+chat. From then on it is part of the transcript: saved in the agent's session
+history, sent to the model provider with every later request, and kept in
+whatever logs and history are retained on either side.
 
-- The `vaultlet` command still works (`bin/vaultlet`), identically.
-- Refs are accepted in both schemes everywhere: `sealref://g/k` and `vaultlet://g/k`.
-- Refs are *printed* as `vaultlet://` by default so existing tools keep working.
-  Print `sealref://` with `SEALREF_REF_SCHEME=sealref` or
-  `sealref --ref-scheme sealref keys <group>`.
-- Storage is unchanged: Keychain service `vaultlet:<group>` and `~/.vaultlet/`.
-  No migration is needed or performed.
-- MCP: tool names are unchanged. `python -m vaultlet.mcp_server` keeps working
-  and reports server name `vaultlet`; `python -m sealref.mcp_server` reports
-  `sealref`. Register under whichever name you like.
+The indirect routes avoid that, but they are tedious. You write the key into a
+`.env` file (which the agent can still read back into the chat), export it in
+the shell before starting the agent, copy it by hand into each command, or set
+up a vault CLI and wire it into every command the agent runs.
 
-## The agent workflow
+## How sealref fixes it
 
-1. The agent calls `list_keys` / `has_secret` over MCP and sees only refs.
-2. If a secret is missing, it calls `request_secret(group, key, reason)`. A
-   local page opens in your browser; you type the value there. The tool
-   returns the ref, not the value. Nothing is pasted into chat.
-3. To use it, the agent runs the real command through sealref:
+The agent asks for a missing secret through an MCP tool, `request_secret`. A
+local page opens in your browser, you type the value there, and it is stored in
+the macOS Keychain; the agent gets back only the reference
+`sealref://stripe/API_KEY`. To use the key, the agent runs its command through
+`sealref run`, which puts the value into that one process's environment and
+replaces it with `«redacted:stripe/API_KEY»` in anything the process prints.
 
-   ```sh
-   sealref run --ref sealref://stripe/API_KEY -- sh -c 'curl -s https://api.stripe.com/v1/balance -u "$API_KEY:"'
-   sealref run --group stripe -- ./deploy.sh
-   ```
+```
+                 the chat contains           command output that echoes the key shows
+pasting the key  sk-test-EXAMPLE             sk-test-EXAMPLE
+with sealref     sealref://stripe/API_KEY    «redacted:stripe/API_KEY»
+```
 
-   The value goes into the child's environment. The child's stdout and stderr
-   are streamed back with every injected value, and its base64 and
-   URL-encoded forms, replaced by `«redacted:stripe/API_KEY»`.
+This guards against a secret landing in a transcript by accident. It does not
+stop an agent that is trying to get the value; see [Threat model](#threat-model).
 
-There is no MCP tool and no CLI command that prints a value. That is the
-design; see [Threat model](#threat-model) for what it does and does not buy you.
+## Screenshots
+
+Captured from a real run of the MCP server, CLI and local page, with dummy
+values such as `sk-test-EXAMPLE`. Refs are shown as `sealref://` because
+`SEALREF_REF_SCHEME=sealref` was set; by default they print as `vaultlet://`
+(see [Renamed from vaultlet](#renamed-from-vaultlet-compatibility)).
+
+**1. The agent calls `request_secret`; you type the value into a local page.**
+The banner shows the reason the agent gave. The page is served on 127.0.0.1,
+and that server stops once the value is saved.
+
+![request_secret page with the value typed into a password field](docs/screenshots/01-request-page.png)
+
+**2. What the agent gets back over MCP: names and refs, never the value.**
+
+![MCP tool calls and their results: has_secret returns false, request_secret returns sealref://stripe/API_KEY, list_keys returns the key name and ref](docs/screenshots/02-agent-sees-refs.png)
+
+**3. Using the key: `sealref run` injects it into the command and scrubs the output.**
+httpbin.org echoes the request headers back, so the real key was sent and the
+output still shows only the placeholder.
+
+![sealref run output with the Authorization header and a base64 encoding of the key replaced by «redacted:stripe/API_KEY»](docs/screenshots/03-run-redacted.png)
+
+**4. Managing secrets with `sealref ui`.** Values are masked; "Copy ref" copies
+the reference, not the value.
+
+![sealref ui page listing github and stripe groups with masked values](docs/screenshots/04-manage-page.png)
 
 ## Install
 
@@ -60,6 +82,9 @@ sealref groups
 sealref keys stripe              # key names and refs, no values
 sealref run --group stripe -- sh -c 'echo "key length: ${#API_KEY}"'
 ```
+
+Then register the MCP server (next section) so your agent can list refs and
+call `request_secret` instead of asking you to paste a key.
 
 ## MCP setup (Claude Code)
 
@@ -86,6 +111,26 @@ Equivalent `.mcp.json`:
 `mcp` is pinned to 1.x because 2.0 removed `mcp.server.fastmcp`, which the
 server uses. Tools: `list_groups`, `list_keys`, `has_secret`,
 `request_secret`, `usage_hint`. All return names or refs, never values.
+
+## The agent workflow
+
+1. The agent calls `list_keys` / `has_secret` over MCP and sees only refs.
+2. If a secret is missing, it calls `request_secret(group, key, reason)`. A
+   local page opens in your browser; you type the value there. The tool
+   returns the ref, not the value. Nothing is pasted into chat.
+3. To use it, the agent runs the real command through sealref:
+
+   ```sh
+   sealref run --ref sealref://stripe/API_KEY -- sh -c 'curl -s https://api.stripe.com/v1/balance -u "$API_KEY:"'
+   sealref run --group stripe -- ./deploy.sh
+   ```
+
+   The value goes into the child's environment. The child's stdout and stderr
+   are streamed back with every injected value, and its base64 and
+   URL-encoded forms, replaced by `«redacted:stripe/API_KEY»`.
+
+There is no MCP tool and no CLI command that prints a value. That is the
+design; see [Threat model](#threat-model) for what it does and does not buy you.
 
 ## CLI
 
@@ -164,6 +209,21 @@ See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.
 
 Do not use sealref if you need Linux or Windows, team sharing, audit logging,
 rotation, a hardened boundary against a hostile agent, or production secrets.
+
+## Renamed from vaultlet (compatibility)
+
+sealref was called vaultlet. Nothing existing breaks:
+
+- The `vaultlet` command still works (`bin/vaultlet`), identically.
+- Refs are accepted in both schemes everywhere: `sealref://g/k` and `vaultlet://g/k`.
+- Refs are *printed* as `vaultlet://` by default so existing tools keep working.
+  Print `sealref://` with `SEALREF_REF_SCHEME=sealref` or
+  `sealref --ref-scheme sealref keys <group>`.
+- Storage is unchanged: Keychain service `vaultlet:<group>` and `~/.vaultlet/`.
+  No migration is needed or performed.
+- MCP: tool names are unchanged. `python -m vaultlet.mcp_server` keeps working
+  and reports server name `vaultlet`; `python -m sealref.mcp_server` reports
+  `sealref`. Register under whichever name you like.
 
 ## Development
 
