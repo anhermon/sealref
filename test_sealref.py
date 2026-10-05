@@ -337,7 +337,10 @@ class McpStdoutCleanTest(unittest.TestCase):
                     'if read -r line; then echo "BROWSER-READ-STDIN $line" >&2; fi\n'
                     f'touch "{marker}"\n')
         os.chmod(browser, 0o755)
-        code = ("import sys, time; from sealref import ui; "
+        # HTTPServer.server_bind() calls socket.getfqdn(), whose reverse DNS
+        # lookup can take ~30s on GitHub's macOS runners; it is irrelevant here.
+        code = ("import socket, sys, time; socket.getfqdn = lambda name='': name; "
+                "from sealref import ui; "
                 f"ui._BROWSER_HELPER = [{browser!r}]; "
                 "ok = ui.serve_until('g', 'API_KEY', 'test', timeout=1.5); "
                 "time.sleep(0.5); "
@@ -350,7 +353,7 @@ class McpStdoutCleanTest(unittest.TestCase):
             fin.write('{"jsonrpc": "2.0", "method": "ping"}\n')
             fin.seek(0)
             rc = subprocess.run([sys.executable, "-c", code], stdin=fin, stdout=fout,
-                                stderr=ferr, env=env, timeout=30).returncode
+                                stderr=ferr, env=env, timeout=60).returncode
             fout.seek(0)
             ferr.seek(0)
             out, err = fout.read(), ferr.read()
