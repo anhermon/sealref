@@ -318,33 +318,53 @@ class RunAcceptsBothSchemesTest(unittest.TestCase):
 
 
 class McpStdoutCleanTest(unittest.TestCase):
-    """request_secret runs ui.serve_until() inside the MCP server, where stdout
-    is the JSON-RPC channel. Nothing on that path may write to stdout, including
-    the program that opens the browser."""
+    """request_secret runs ui.serve_until() inside the MCP server, where stdin
+    and stdout are the JSON-RPC channel. Nothing on that path may write to
+    stdout or read stdin, including the program that opens the browser."""
 
     ROOT = os.path.dirname(os.path.abspath(__file__))
 
-    def test_serve_until_writes_nothing_to_stdout(self):
-        home = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, home, True)
-        marker = os.path.join(home, "browser-ran")
-        # A $BROWSER command that prints to stdout, the way some launchers do.
-        browser = os.path.join(home, "noisy-browser")
+    def test_serve_until_keeps_stdio_clean(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        marker = os.path.join(tmp, "browser-ran")
+        # Stands in for the browser launcher: prints to stdout, the way some
+        # launchers do, and tries to read stdin.
+        browser = os.path.join(tmp, "noisy-browser")
         with open(browser, "w") as f:
-            f.write(f'#!/bin/sh\necho "BROWSER-STDOUT $1"\ntouch "{marker}"\n')
+            f.write("#!/bin/sh\n"
+                    'echo "BROWSER-STDOUT $1"\n'
+                    'if read -r line; then echo "BROWSER-READ-STDIN $line" >&2; fi\n'
+                    f'touch "{marker}"\n')
         os.chmod(browser, 0o755)
-        env = {**os.environ, "PYTHONPATH": self.ROOT, "HOME": home, "BROWSER": browser + " %s"}
-        code = ("from sealref import ui; "
+        code = ("import sys, time; from sealref import ui; "
+                f"ui._BROWSER_HELPER = [{browser!r}]; "
                 "ok = ui.serve_until('g', 'API_KEY', 'test', timeout=1.5); "
-                "import time; time.sleep(0.5); "
+                "time.sleep(0.5); "
                 "raise SystemExit(0 if ok is False else 3)")
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                           env=env, timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout, "")
-        self.assertIn("sealref: serving on http://127.0.0.1:", r.stderr)
+        env = {**os.environ, "PYTHONPATH": self.ROOT, "HOME": tmp}
+        # Files, not pipes, so a lingering grandchild cannot stall the test.
+        with open(os.path.join(tmp, "in"), "w+") as fin, \
+                open(os.path.join(tmp, "out"), "w+") as fout, \
+                open(os.path.join(tmp, "err"), "w+") as ferr:
+            fin.write('{"jsonrpc": "2.0", "method": "ping"}\n')
+            fin.seek(0)
+            rc = subprocess.run([sys.executable, "-c", code], stdin=fin, stdout=fout,
+                                stderr=ferr, env=env, timeout=30).returncode
+            fout.seek(0)
+            ferr.seek(0)
+            out, err = fout.read(), ferr.read()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        self.assertIn("sealref: serving on http://127.0.0.1:", err)
         self.assertTrue(os.path.exists(marker), "browser command did not run")
-        self.assertIn("BROWSER-STDOUT http://127.0.0.1:", r.stderr)
+        self.assertIn("BROWSER-STDOUT http://127.0.0.1:", err)
+        self.assertNotIn("BROWSER-READ-STDIN", err)
+
+    def test_default_helper_uses_webbrowser(self):
+        from sealref import ui
+        self.assertEqual(ui._BROWSER_HELPER[0], sys.executable)
+        self.assertIn("webbrowser.open(sys.argv[1])", ui._BROWSER_HELPER[-1])
 
 
 class GetSecretIntegrationTest(unittest.TestCase):

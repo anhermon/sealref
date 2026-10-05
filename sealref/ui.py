@@ -118,6 +118,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(e)})
 
 
+# Command that opens a URL (appended as the last argument). Tests replace it.
+_BROWSER_HELPER = [sys.executable, "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])"]
+
+
 def _open_browser(url):
     """Open url in the user's browser without touching our stdin or stdout.
 
@@ -127,7 +131,7 @@ def _open_browser(url):
     from it. So launch from a helper process with stdin closed and stdout
     pointed at our stderr."""
     proc = subprocess.Popen(
-        [sys.executable, "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])", url],
+        [*_BROWSER_HELPER, url],
         stdin=subprocess.DEVNULL,
         stdout=2,
     )
