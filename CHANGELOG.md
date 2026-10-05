@@ -9,6 +9,17 @@
   the browser is opened from a helper process with stdin closed and stdout sent
   to stderr. Before, both could write into the MCP server's stdout, which is the
   JSON-RPC channel. `sealref ui` prints its "serving on" line to stderr as well.
+  If the browser cannot be launched, a note goes to stderr and the request
+  still waits for the value.
+- The request page banner reads "Your agent needs a secret:" instead of naming
+  Claude.
+- `--ref-scheme` with an unknown value now reports the flag, not
+  `SEALREF_REF_SCHEME`.
+- `sealref run` closes the child's output pipe (fixes a ResourceWarning).
+- Docs: redaction wording now says it is line-based, covers the raw value and
+  its base64 / URL-encoded forms, and that `run` merges the child's stderr into
+  stdout. The threat model notes that base64 of the value combined with other
+  text (e.g. HTTP Basic `user:key`) is not caught.
 
 - Renamed to **sealref**. New primary command `sealref` and ref scheme
   `sealref://group/key`. Backward compatible on input: the `vaultlet` command,

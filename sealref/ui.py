@@ -130,11 +130,17 @@ def _open_browser(url):
     $BROWSER command, osascript) inherit them, write into the channel or read
     from it. So launch from a helper process with stdin closed and stdout
     pointed at our stderr."""
-    proc = subprocess.Popen(
-        [*_BROWSER_HELPER, url],
-        stdin=subprocess.DEVNULL,
-        stdout=2,
-    )
+    try:
+        proc = subprocess.Popen(
+            [*_BROWSER_HELPER, url],
+            stdin=subprocess.DEVNULL,
+            stdout=2,
+        )
+    except OSError as e:
+        # Not fatal: the page is still being served, the user can open it.
+        print(f"sealref: could not open a browser ({e}); open {url} manually",
+              file=sys.stderr)
+        return
     threading.Thread(target=proc.wait, daemon=True).start()  # reap it
 
 
@@ -259,7 +265,7 @@ const reason = params.get('reason');
 
 if (reason) {
   document.getElementById('banner').innerHTML =
-    '<div class="banner">Claude needs a secret: ' + escapeHtml(reason) + '</div>';
+    '<div class="banner">Your agent needs a secret: ' + escapeHtml(reason) + '</div>';
 }
 
 function escapeHtml(s) {

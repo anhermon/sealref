@@ -127,9 +127,11 @@ server uses. Tools: `list_groups`, `list_keys`, `has_secret`,
    sealref run --group stripe -- ./deploy.sh
    ```
 
-   The value goes into the child's environment. The child's stdout and stderr
-   are streamed back with every injected value, and its base64 and
-   URL-encoded forms, replaced by `«redacted:stripe/API_KEY»`.
+   The value goes into the child's environment. The child's stderr is merged
+   into its stdout, and that combined output comes back on sealref's stdout.
+   Redaction is line-based: in each line, every injected value, and its base64
+   and URL-encoded forms, is replaced by `«redacted:stripe/API_KEY»`. See
+   [Threat model](#threat-model) for what that does not catch.
 
 There is no MCP tool and no CLI command that prints a value. That is the
 design; see [Threat model](#threat-model) for what it does and does not buy you.
@@ -146,6 +148,8 @@ sealref run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 
 `--group G` injects every key in G under its own name. `--ref` injects one key,
 optionally under another env var name. `run` exits with the child's exit code.
+The child's stderr is merged into its stdout; both come out, redacted, on
+`run`'s stdout.
 `run` does not expand `$VARS` itself; wrap in `sh -c` if the command line needs
 them. Group names match `[A-Za-z0-9_.-]+`; key names must be valid env var names.
 
@@ -176,6 +180,9 @@ wants the value.
 - Redaction is line-based. A value split across lines, or in a stream that never
   emits a newline, can pass through. Encodings other than raw, base64 and
   URL-quoted are not caught.
+- Base64 detection covers the base64 of the value on its own. The value
+  base64-encoded together with other text, such as an HTTP Basic `user:key`
+  credential, is generally not caught.
 - Values shorter than 4 characters are not redacted (a warning is printed).
 - Values cannot contain newlines.
 - `request_secret` shows the agent-supplied `reason` text on the page. It is
@@ -233,8 +240,8 @@ sealref was called vaultlet. Existing setups keep working, with one output chang
 python3 -m unittest -v test_sealref
 ```
 
-The Keychain round-trip test writes and deletes an item named
-`vaultlet:vaultlet-test-integration`. Set `SEALREF_SKIP_KEYCHAIN=1` (or legacy `VAULTLET_SKIP_KEYCHAIN=1`) to skip it.
+The Keychain round-trip test writes and deletes a Keychain item with service
+`vaultlet:sealref-test-integration` and account `TEST_KEY`. Set `SEALREF_SKIP_KEYCHAIN=1` (or legacy `VAULTLET_SKIP_KEYCHAIN=1`) to skip it.
 
 ## License
 

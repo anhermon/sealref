@@ -92,6 +92,23 @@ class CommandNameTest(unittest.TestCase):
                         cli.main(argv)
                     self.assertEqual(buf.getvalue().strip(), want, argv)
 
+    def test_bogus_ref_scheme_flag_names_the_flag(self):
+        import contextlib
+        import io
+        from sealref import cli
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SEALREF_REF_SCHEME", None)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli.main(["--ref-scheme", "bogus", "keys", "g"])
+            self.assertEqual(rc, 2)
+            self.assertIn("--ref-scheme must be one of sealref, vaultlet, got 'bogus'", err.getvalue())
+            self.assertNotIn("SEALREF_REF_SCHEME", err.getvalue())
+            self.assertNotIn("SEALREF_REF_SCHEME", os.environ)
+            os.environ["SEALREF_REF_SCHEME"] = "bogus"  # env as the source: names the env var
+            with self.assertRaisesRegex(ValueError, "SEALREF_REF_SCHEME"):
+                store.ref("g", "K")
+
     def test_keys_default_scheme_both_commands(self):
         """`keys` prints sealref:// by default from both entry points, and
         vaultlet:// when SEALREF_REF_SCHEME=vaultlet."""
@@ -294,6 +311,14 @@ class UiGuardTest(unittest.TestCase):
         self.assertEqual(self._req("POST", "/api/groups", '{"group":"x"}', {"X-Vaultlet": None}), 403)
         self.assertEqual(self._req("POST", "/api/quit", "{}", {"X-Vaultlet": None}), 403)
 
+    def test_request_banner_is_agent_neutral(self):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port)
+        c.request("GET", "/", headers={"Host": f"127.0.0.1:{self.port}"})
+        page = c.getresponse().read().decode()
+        self.assertIn("Your agent needs a secret: ", page)
+        self.assertNotIn("Claude", page)
+
     def test_delete_bad_name_is_400(self):
         self.assertEqual(self._req("DELETE", "/api/groups/a%20b"), 400)
 
@@ -304,14 +329,21 @@ class RunAcceptsBothSchemesTest(unittest.TestCase):
 
     def test_both_schemes_resolve(self):
         import contextlib
+        import gc
         import io
+        import warnings
         from sealref import cli
         for scheme in ("sealref", "vaultlet"):
-            with mock.patch.object(store, "_resolve", return_value="sk-test-EXAMPLE") as res:
+            with mock.patch.object(store, "_resolve", return_value="sk-test-EXAMPLE") as res, \
+                    warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     rc = cli.cmd_run(["--ref", f"{scheme}://stripe/API_KEY", "--",
                                       "sh", "-c", 'echo "len=${#API_KEY} val=$API_KEY"'])
+                gc.collect()
+            self.assertEqual([w for w in caught if issubclass(w.category, ResourceWarning)], [],
+                             "child output pipe left open")
             self.assertEqual(rc, 0)
             res.assert_called_once_with("stripe", "API_KEY")
             self.assertEqual(buf.getvalue(), "len=15 val=«redacted:stripe/API_KEY»\n", scheme)
@@ -363,6 +395,17 @@ class McpStdoutCleanTest(unittest.TestCase):
         self.assertTrue(os.path.exists(marker), "browser command did not run")
         self.assertIn("BROWSER-STDOUT http://127.0.0.1:", err)
         self.assertNotIn("BROWSER-READ-STDIN", err)
+
+    def test_browser_launch_failure_is_not_fatal(self):
+        import contextlib
+        import io
+        from sealref import ui
+        err = io.StringIO()
+        with mock.patch.object(ui, "_BROWSER_HELPER", ["/nonexistent/sealref-no-such-browser"]), \
+                contextlib.redirect_stderr(err):
+            ui._open_browser("http://127.0.0.1:1/")  # must not raise
+        self.assertIn("could not open a browser", err.getvalue())
+        self.assertIn("open http://127.0.0.1:1/ manually", err.getvalue())
 
     def test_default_helper_uses_webbrowser(self):
         from sealref import ui
