@@ -23,7 +23,9 @@ local page opens in your browser, you type the value there, and it is stored in
 the macOS Keychain; the agent gets back only the reference
 `sealref://stripe/API_KEY`. To use the key, the agent runs its command through
 `sealref run`, which puts the value into that one process's environment and
-replaces it with `«redacted:stripe/API_KEY»` in anything the process prints.
+replaces the raw value and its base64 / URL-encoded forms in the child's
+line-buffered stdout/stderr with `«redacted:stripe/API_KEY»` (see
+[Threat model](#threat-model) for limits).
 
 ```
                  the chat contains           command output that echoes the key shows
@@ -37,7 +39,9 @@ stop an agent that is trying to get the value; see [Threat model](#threat-model)
 ## Screenshots
 
 Captured from a real run of the MCP server, CLI and local page, with dummy
-values such as `sk-test-EXAMPLE`. Refs are shown as `sealref://` because
+values such as `sk-test-EXAMPLE`. Captured on Linux with a stand-in `security`
+helper (no macOS Keychain on the capture box). MCP/CLI outputs are real;
+panels 2–3 are styled HTML frames, not raw Terminal.app. Refs are shown as `sealref://` because
 `SEALREF_REF_SCHEME=sealref` was set; by default they print as `vaultlet://`
 (see [Renamed from vaultlet](#renamed-from-vaultlet-compatibility)).
 
