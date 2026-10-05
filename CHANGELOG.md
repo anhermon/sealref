@@ -11,8 +11,8 @@
   JSON-RPC channel. `sealref ui` prints its "serving on" line to stderr as well.
 
 - Renamed to **sealref**. New primary command `sealref` and ref scheme
-  `sealref://group/key`. Fully backward compatible: the `vaultlet` command,
-  `python -m vaultlet[.mcp_server]` and `vaultlet://` refs work unchanged; both
+  `sealref://group/key`. Backward compatible on input: the `vaultlet` command,
+  `python -m vaultlet[.mcp_server]` and `vaultlet://` refs keep working; both
   schemes are accepted everywhere. Refs print as `sealref://`; set
   `SEALREF_REF_SCHEME=vaultlet` or `--ref-scheme vaultlet` to print the legacy
   scheme. Keychain service

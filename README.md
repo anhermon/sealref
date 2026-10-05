@@ -214,9 +214,9 @@ rotation, a hardened boundary against a hostile agent, or production secrets.
 
 ## Renamed from vaultlet (compatibility)
 
-sealref was called vaultlet. Nothing existing breaks:
+sealref was called vaultlet. Existing setups keep working, with one output change:
 
-- The `vaultlet` command still works (`bin/vaultlet`), identically.
+- The `vaultlet` command still works (`bin/vaultlet`); like `sealref`, it now prints `sealref://` refs.
 - Refs are accepted in both schemes everywhere: `sealref://g/k` and `vaultlet://g/k`.
 - Refs are *printed* as `sealref://`. If a script of yours still expects
   `vaultlet://` output, set `SEALREF_REF_SCHEME=vaultlet` or use
