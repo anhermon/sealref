@@ -71,9 +71,10 @@ SCHEMES = ("sealref", "vaultlet")
 
 
 def ref(group: str, key: str) -> str:
-    # Default output stays vaultlet:// so existing tools keep working;
-    # SEALREF_REF_SCHEME=sealref (or --ref-scheme sealref) switches it.
-    scheme = os.environ.get("SEALREF_REF_SCHEME", "vaultlet")
+    # Output defaults to sealref://. SEALREF_REF_SCHEME=vaultlet (or
+    # --ref-scheme vaultlet) prints the legacy scheme for tools that still
+    # expect it. Input accepts both schemes regardless (see parse_ref).
+    scheme = os.environ.get("SEALREF_REF_SCHEME", "sealref")
     if scheme not in SCHEMES:
         raise ValueError(f"SEALREF_REF_SCHEME must be one of {SCHEMES}, got {scheme!r}")
     return f"{scheme}://{group}/{key}"

@@ -15,8 +15,10 @@ from sealref.cli import _build_needles, _redact_line
 
 class RefTest(unittest.TestCase):
     def test_round_trip(self):
-        r = store.ref("myapp", "API_KEY")
-        self.assertEqual(r, "vaultlet://myapp/API_KEY")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SEALREF_REF_SCHEME", None)
+            r = store.ref("myapp", "API_KEY")
+        self.assertEqual(r, "sealref://myapp/API_KEY")
         self.assertEqual(store.parse_ref(r), ("myapp", "API_KEY"))
 
     def test_parse_rejects_garbage(self):
@@ -32,9 +34,11 @@ class SchemeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.parse_ref("other://g/K")
 
-    def test_output_default_legacy_and_env_switch(self):
+    def test_output_default_sealref_and_env_switch(self):
         with mock.patch.dict(os.environ, clear=False):
             os.environ.pop("SEALREF_REF_SCHEME", None)
+            self.assertEqual(store.ref("g", "K"), "sealref://g/K")
+            os.environ["SEALREF_REF_SCHEME"] = "vaultlet"
             self.assertEqual(store.ref("g", "K"), "vaultlet://g/K")
             os.environ["SEALREF_REF_SCHEME"] = "sealref"
             self.assertEqual(store.ref("g", "K"), "sealref://g/K")
@@ -79,10 +83,45 @@ class CommandNameTest(unittest.TestCase):
             from sealref import cli
             with mock.patch.object(cli, "COMMANDS", {"x": lambda rest: print(store.ref("g", "K")) or 0}):
                 import io, contextlib
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
-                    cli.main(["--ref-scheme", "sealref", "x"])
-                self.assertEqual(buf.getvalue().strip(), "sealref://g/K")
+                for argv, want in ((["x"], "sealref://g/K"),
+                                   (["--ref-scheme", "vaultlet", "x"], "vaultlet://g/K"),
+                                   (["--ref-scheme=sealref", "x"], "sealref://g/K")):
+                    os.environ.pop("SEALREF_REF_SCHEME", None)
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        cli.main(argv)
+                    self.assertEqual(buf.getvalue().strip(), want, argv)
+
+    def test_bogus_ref_scheme_flag_names_the_flag(self):
+        import contextlib
+        import io
+        from sealref import cli
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SEALREF_REF_SCHEME", None)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli.main(["--ref-scheme", "bogus", "keys", "g"])
+            self.assertEqual(rc, 2)
+            self.assertIn("--ref-scheme must be one of sealref, vaultlet, got 'bogus'", err.getvalue())
+            self.assertNotIn("SEALREF_REF_SCHEME", err.getvalue())
+            self.assertNotIn("SEALREF_REF_SCHEME", os.environ)
+            os.environ["SEALREF_REF_SCHEME"] = "bogus"  # env as the source: names the env var
+            with self.assertRaisesRegex(ValueError, "SEALREF_REF_SCHEME"):
+                store.ref("g", "K")
+
+    def test_keys_default_scheme_both_commands(self):
+        """`keys` prints sealref:// by default from both entry points, and
+        vaultlet:// when SEALREF_REF_SCHEME=vaultlet."""
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        os.makedirs(os.path.join(home, ".vaultlet"))
+        with open(os.path.join(home, ".vaultlet", "index.json"), "w") as f:
+            json.dump({"groups": {"g": {"keys": {"API_KEY": {}}}}}, f)
+        for mod in ("sealref", "vaultlet"):
+            r = self._run("-m", mod, "keys", "g", env={"HOME": home})
+            self.assertEqual(r.stdout, "API_KEY  sealref://g/API_KEY\n", mod)
+            r = self._run("-m", mod, "keys", "g", env={"HOME": home, "SEALREF_REF_SCHEME": "vaultlet"})
+            self.assertEqual(r.stdout, "API_KEY  vaultlet://g/API_KEY\n", mod)
 
     def test_mcp_alias_module_importable(self):
         try:
@@ -124,8 +163,10 @@ class NameValidationTest(unittest.TestCase):
     @mock.patch("sealref.store.subprocess.run")
     def test_set_secret_accepts_good_key(self, mock_run):
         mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
-        r = store.set_secret("g", "API_KEY", "secretvalue")
-        self.assertEqual(r, "vaultlet://g/API_KEY")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SEALREF_REF_SCHEME", None)
+            r = store.set_secret("g", "API_KEY", "secretvalue")
+        self.assertEqual(r, "sealref://g/API_KEY")
         self.assertIn("API_KEY", store.list_keys("g"))
         argv = mock_run.call_args[0][0]
         self.assertEqual(argv, ["security", "-i"])
@@ -270,8 +311,106 @@ class UiGuardTest(unittest.TestCase):
         self.assertEqual(self._req("POST", "/api/groups", '{"group":"x"}', {"X-Vaultlet": None}), 403)
         self.assertEqual(self._req("POST", "/api/quit", "{}", {"X-Vaultlet": None}), 403)
 
+    def test_request_banner_is_agent_neutral(self):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port)
+        c.request("GET", "/", headers={"Host": f"127.0.0.1:{self.port}"})
+        page = c.getresponse().read().decode()
+        self.assertIn("Your agent needs a secret: ", page)
+        self.assertNotIn("Claude", page)
+
     def test_delete_bad_name_is_400(self):
         self.assertEqual(self._req("DELETE", "/api/groups/a%20b"), 400)
+
+
+class RunAcceptsBothSchemesTest(unittest.TestCase):
+    """`run --ref` resolves sealref:// and legacy vaultlet:// refs to the same
+    Keychain item and injects the value."""
+
+    def test_both_schemes_resolve(self):
+        import contextlib
+        import gc
+        import io
+        import warnings
+        from sealref import cli
+        for scheme in ("sealref", "vaultlet"):
+            with mock.patch.object(store, "_resolve", return_value="sk-test-EXAMPLE") as res, \
+                    warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.cmd_run(["--ref", f"{scheme}://stripe/API_KEY", "--",
+                                      "sh", "-c", 'echo "len=${#API_KEY} val=$API_KEY"'])
+                gc.collect()
+            self.assertEqual([w for w in caught if issubclass(w.category, ResourceWarning)], [],
+                             "child output pipe left open")
+            self.assertEqual(rc, 0)
+            res.assert_called_once_with("stripe", "API_KEY")
+            self.assertEqual(buf.getvalue(), "len=15 val=«redacted:stripe/API_KEY»\n", scheme)
+
+
+class McpStdoutCleanTest(unittest.TestCase):
+    """request_secret runs ui.serve_until() inside the MCP server, where stdin
+    and stdout are the JSON-RPC channel. Nothing on that path may write to
+    stdout or read stdin, including the program that opens the browser."""
+
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+
+    def test_serve_until_keeps_stdio_clean(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        marker = os.path.join(tmp, "browser-ran")
+        # Stands in for the browser launcher: prints to stdout, the way some
+        # launchers do, and tries to read stdin.
+        browser = os.path.join(tmp, "noisy-browser")
+        with open(browser, "w") as f:
+            f.write("#!/bin/sh\n"
+                    'echo "BROWSER-STDOUT $1"\n'
+                    'if read -r line; then echo "BROWSER-READ-STDIN $line" >&2; fi\n'
+                    f'touch "{marker}"\n')
+        os.chmod(browser, 0o755)
+        # HTTPServer.server_bind() calls socket.getfqdn(), whose reverse DNS
+        # lookup can take ~30s on GitHub's macOS runners; it is irrelevant here.
+        code = ("import socket, sys, time; socket.getfqdn = lambda name='': name; "
+                "from sealref import ui; "
+                f"ui._BROWSER_HELPER = [{browser!r}]; "
+                "ok = ui.serve_until('g', 'API_KEY', 'test', timeout=1.5); "
+                "time.sleep(0.5); "
+                "raise SystemExit(0 if ok is False else 3)")
+        env = {**os.environ, "PYTHONPATH": self.ROOT, "HOME": tmp}
+        # Files, not pipes, so a lingering grandchild cannot stall the test.
+        with open(os.path.join(tmp, "in"), "w+") as fin, \
+                open(os.path.join(tmp, "out"), "w+") as fout, \
+                open(os.path.join(tmp, "err"), "w+") as ferr:
+            fin.write('{"jsonrpc": "2.0", "method": "ping"}\n')
+            fin.seek(0)
+            rc = subprocess.run([sys.executable, "-c", code], stdin=fin, stdout=fout,
+                                stderr=ferr, env=env, timeout=60).returncode
+            fout.seek(0)
+            ferr.seek(0)
+            out, err = fout.read(), ferr.read()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "")
+        self.assertIn("sealref: serving on http://127.0.0.1:", err)
+        self.assertTrue(os.path.exists(marker), "browser command did not run")
+        self.assertIn("BROWSER-STDOUT http://127.0.0.1:", err)
+        self.assertNotIn("BROWSER-READ-STDIN", err)
+
+    def test_browser_launch_failure_is_not_fatal(self):
+        import contextlib
+        import io
+        from sealref import ui
+        err = io.StringIO()
+        with mock.patch.object(ui, "_BROWSER_HELPER", ["/nonexistent/sealref-no-such-browser"]), \
+                contextlib.redirect_stderr(err):
+            ui._open_browser("http://127.0.0.1:1/")  # must not raise
+        self.assertIn("could not open a browser", err.getvalue())
+        self.assertIn("open http://127.0.0.1:1/ manually", err.getvalue())
+
+    def test_default_helper_uses_webbrowser(self):
+        from sealref import ui
+        self.assertEqual(ui._BROWSER_HELPER[0], sys.executable)
+        self.assertIn("webbrowser.open(sys.argv[1])", ui._BROWSER_HELPER[-1])
 
 
 class GetSecretIntegrationTest(unittest.TestCase):

@@ -23,8 +23,8 @@ commands:
   run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 
 refs: sealref://group/key and legacy vaultlet://group/key are both accepted.
-Output refs default to vaultlet://; use --ref-scheme sealref (before the
-command) or SEALREF_REF_SCHEME=sealref to print sealref://.
+Output refs default to sealref://; use --ref-scheme vaultlet (before the
+command) or SEALREF_REF_SCHEME=vaultlet to print the legacy vaultlet://.
 """
 
 
@@ -192,9 +192,10 @@ def cmd_run(rest):
         bufsize=1,
     )
     try:
-        for line in proc.stdout:
-            sys.stdout.write(_redact_line(line, needles))
-            sys.stdout.flush()
+        with proc.stdout:
+            for line in proc.stdout:
+                sys.stdout.write(_redact_line(line, needles))
+                sys.stdout.flush()
         proc.wait()
     except KeyboardInterrupt:
         proc.terminate()
@@ -217,10 +218,17 @@ def main(argv=None):
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE.format(prog=PROG), end="")
         return 0 if argv and argv[0] in ("-h", "--help") else 2
+    scheme = None
     if argv[0] == "--ref-scheme" and len(argv) > 1:
-        os.environ["SEALREF_REF_SCHEME"], argv = argv[1], argv[2:]
+        scheme, argv = argv[1], argv[2:]
     elif argv[0].startswith("--ref-scheme="):
-        os.environ["SEALREF_REF_SCHEME"], argv = argv[0].split("=", 1)[1], argv[1:]
+        scheme, argv = argv[0].split("=", 1)[1], argv[1:]
+    if scheme is not None:
+        if scheme not in store.SCHEMES:
+            print(f"{PROG}: --ref-scheme must be one of {', '.join(store.SCHEMES)}, "
+                  f"got {scheme!r}", file=sys.stderr)
+            return 2
+        os.environ["SEALREF_REF_SCHEME"] = scheme
     if not argv:
         print(USAGE.format(prog=PROG), end="", file=sys.stderr)
         return 2

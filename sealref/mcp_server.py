@@ -7,7 +7,8 @@ These tools hand out *refs* (`sealref://group/key`), never values. There is
 deliberately no get/read/reveal/resolve tool -- that absence is the whole
 point of sealref. Consume a secret by running a child process through
 `sealref run --group G -- <cmd>`, which injects it into that child's env
-and redacts it from the child's output.
+and redacts it from the child's output, line by line (raw value, base64 and
+URL-encoded forms only).
 """
 import logging
 import os
@@ -76,15 +77,21 @@ def usage_hint() -> str:
     you only ever hold refs (sealref://group/key), never values. Consume
     them by running the target command through
     `sealref run --group G -- <cmd>` (or --ref for a single secret), which
-    injects the value into that child process's environment and redacts it
-    from anything the child prints. Never ask the user to paste a secret
-    into chat -- always request_secret to open the UI instead."""
+    injects the value into that child process's environment. The child's
+    stderr is merged into its stdout, and that output is redacted line by
+    line: the raw value and its base64 and URL-encoded forms are replaced.
+    Other transformations of the value are not caught. Never ask the user to
+    paste a secret into chat -- always request_secret to open the UI instead."""
     return (
         "You hold refs (sealref://group/key), never secret values -- there is no "
         "tool to read one. To use a secret, run the consuming command through "
         "`sealref run --group <group> -- <cmd> [args...]` (injects every key in "
-        "that group into the child's env, redacts them from its output) or "
+        "that group into the child's env) or "
         "`sealref run --ref sealref://g/k -- <cmd>` for a single secret. "
+        "The child's stdout and stderr come back merged, with each line's raw "
+        "values and their base64 and URL-encoded forms replaced by "
+        "«redacted:group/KEY»; other transformations of a value (reversed, "
+        "split across lines, encoded with other text) are not caught. "
         "If a secret is missing, call request_secret(group, key, reason) to open "
         "the sealref UI for the user to type it in -- never ask the user to "
         "paste a secret value into chat."

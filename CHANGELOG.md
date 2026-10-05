@@ -2,11 +2,31 @@
 
 ## Unreleased
 
+- Refs now print as `sealref://` by default (previously `vaultlet://`).
+  `vaultlet://` refs are still accepted everywhere, and
+  `SEALREF_REF_SCHEME=vaultlet` / `--ref-scheme vaultlet` restores the old output.
+- `request_secret` / `sealref request`: the "serving on" line goes to stderr, and
+  the browser is opened from a helper process with stdin closed and stdout sent
+  to stderr. Before, both could write into the MCP server's stdout, which is the
+  JSON-RPC channel. `sealref ui` prints its "serving on" line to stderr as well.
+  If the browser cannot be launched, a note goes to stderr and the request
+  still waits for the value.
+- The request page banner reads "Your agent needs a secret:" instead of naming
+  Claude.
+- `--ref-scheme` with an unknown value now reports the flag, not
+  `SEALREF_REF_SCHEME`.
+- `sealref run` closes the child's output pipe (fixes a ResourceWarning).
+- Docs: redaction wording now says it is line-based, covers the raw value and
+  its base64 / URL-encoded forms, and that `run` merges the child's stderr into
+  stdout. The threat model notes that base64 of the value combined with other
+  text (e.g. HTTP Basic `user:key`) is not caught.
+
 - Renamed to **sealref**. New primary command `sealref` and ref scheme
-  `sealref://group/key`. Fully backward compatible: the `vaultlet` command,
-  `python -m vaultlet[.mcp_server]` and `vaultlet://` refs work unchanged; both
-  schemes are accepted everywhere. Refs print as `vaultlet://` unless
-  `SEALREF_REF_SCHEME=sealref` or `--ref-scheme sealref` is set. Keychain service
+  `sealref://group/key`. Backward compatible on input: the `vaultlet` command,
+  `python -m vaultlet[.mcp_server]` and `vaultlet://` refs keep working; both
+  schemes are accepted everywhere. Refs print as `sealref://`; set
+  `SEALREF_REF_SCHEME=vaultlet` or `--ref-scheme vaultlet` to print the legacy
+  scheme. Keychain service
   (`vaultlet:<group>`) and `~/.vaultlet` are unchanged (no migration).
   MCP tool names unchanged; server name is `sealref`, or `vaultlet` via the alias.
   `SEALREF_SKIP_KEYCHAIN` added next to `VAULTLET_SKIP_KEYCHAIN`.
