@@ -11,9 +11,9 @@ sealref was called vaultlet. Nothing existing breaks:
 
 - The `vaultlet` command still works (`bin/vaultlet`), identically.
 - Refs are accepted in both schemes everywhere: `sealref://g/k` and `vaultlet://g/k`.
-- Refs are *printed* as `vaultlet://` by default so existing tools keep working.
-  Print `sealref://` with `SEALREF_REF_SCHEME=sealref` or
-  `sealref --ref-scheme sealref keys <group>`.
+- Refs are *printed* as `sealref://`. If a script of yours still expects
+  `vaultlet://` output, set `SEALREF_REF_SCHEME=vaultlet` or use
+  `sealref --ref-scheme vaultlet keys <group>`.
 - Storage is unchanged: Keychain service `vaultlet:<group>` and `~/.vaultlet/`.
   No migration is needed or performed.
 - MCP: tool names are unchanged. `python -m vaultlet.mcp_server` keeps working

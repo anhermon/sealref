@@ -23,8 +23,8 @@ commands:
   run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 
 refs: sealref://group/key and legacy vaultlet://group/key are both accepted.
-Output refs default to vaultlet://; use --ref-scheme sealref (before the
-command) or SEALREF_REF_SCHEME=sealref to print sealref://.
+Output refs default to sealref://; use --ref-scheme vaultlet (before the
+command) or SEALREF_REF_SCHEME=vaultlet to print the legacy vaultlet://.
 """
 
 

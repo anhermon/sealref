@@ -4,9 +4,10 @@ No route ever returns a secret value. store.py's value-reading functions
 (_resolve, _resolve_group) are never imported here.
 """
 import json
+import subprocess
+import sys
 import threading
 import time
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
 
@@ -117,6 +118,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(e)})
 
 
+def _open_browser(url):
+    """Open url in the user's browser without touching our stdin or stdout.
+
+    Inside the MCP server, stdin and stdout are the JSON-RPC channel. Calling
+    webbrowser.open() in-process would let the launched program (xdg-open, a
+    $BROWSER command, osascript) inherit them, write into the channel or read
+    from it. So launch from a helper process with stdin closed and stdout
+    pointed at our stderr."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])", url],
+        stdin=subprocess.DEVNULL,
+        stdout=2,
+    )
+    threading.Thread(target=proc.wait, daemon=True).start()  # reap it
+
+
 def _make_server(port):
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
@@ -124,8 +141,8 @@ def _make_server(port):
 def serve(port=8765):
     server = _make_server(port)
     url = f"http://127.0.0.1:{server.server_port}/"
-    print(f"sealref: serving on {url}")
-    webbrowser.open(url)
+    print(f"sealref: serving on {url}", file=sys.stderr)
+    _open_browser(url)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
@@ -141,8 +158,10 @@ def serve_until(group, key, reason, timeout=300):
     if reason:
         q += f"&reason={quote(reason)}"
     url = f"http://127.0.0.1:{server.server_port}/{q}"
-    print(f"sealref: serving on {url}")
-    webbrowser.open(url)
+    # stderr, not stdout: when called from the MCP server, stdout is the
+    # JSON-RPC transport.
+    print(f"sealref: serving on {url}", file=sys.stderr)
+    _open_browser(url)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
     thread.start()
     deadline = time.time() + timeout
