@@ -345,12 +345,13 @@ class UiGuardTest(unittest.TestCase):
     def _req(self, method, path, body=None, headers=None):
         import http.client
         c = http.client.HTTPConnection("127.0.0.1", self.port)
-        h = {"Host": f"127.0.0.1:{self.port}", "X-Vaultlet": "1"}
+        h = {"Host": f"127.0.0.1:{self.port}", "X-Vaultlet": self.server.token}
         h.update(headers or {})
         h = {k: v for k, v in h.items() if v is not None}
         c.request(method, path, body=body, headers=h)
         r = c.getresponse()
         r.read()
+        self.last_headers = r.headers
         return r.status
 
     def test_same_origin_ok(self):
@@ -365,6 +366,30 @@ class UiGuardTest(unittest.TestCase):
         self.assertEqual(
             self._req("POST", "/api/groups", '{"group":"x"}', {"Origin": "http://evil.example"}), 403)
         self.assertNotIn("x", store.list_groups())
+
+    def test_wrong_or_legacy_token_rejected(self):
+        """Any local program or other macOS user can reach 127.0.0.1 and set
+        headers; without this server's token they get nothing."""
+        for tok in ("1", "", self.server.token[:-1] + "x"):
+            self.assertEqual(self._req("GET", "/api/groups", headers={"X-Vaultlet": tok}), 403)
+            self.assertEqual(self._req("POST", "/api/keys", '{"group":"g","key":"K","value":"v"}',
+                                       {"X-Vaultlet": tok}), 403)
+            self.assertEqual(self._req("DELETE", "/api/keys/g/K", headers={"X-Vaultlet": tok}), 403)
+            self.assertEqual(self._req("POST", "/api/quit", "{}", {"X-Vaultlet": tok}), 403)
+        self.assertEqual(self._req("POST", "/", "{}"), 403)
+
+    def test_not_frameable(self):
+        for path in ("/", "/api/groups"):
+            self.assertEqual(self._req("GET", path), 200)
+            self.assertEqual(self.last_headers["X-Frame-Options"], "DENY")
+            self.assertIn("frame-ancestors 'none'", self.last_headers["Content-Security-Policy"])
+            self.assertEqual(self.last_headers["X-Content-Type-Options"], "nosniff")
+
+    def test_value_field_not_spellchecked_or_autofilled(self):
+        from sealref import ui
+        tag = ui.PAGE[ui.PAGE.index('class="val-input"') - 60:ui.PAGE.index('class="val-input"') + 200]
+        self.assertIn('spellcheck="false"', tag)
+        self.assertIn('autocomplete="off"', tag)
 
     def test_missing_custom_header_rejected(self):
         self.assertEqual(self._req("POST", "/api/groups", '{"group":"x"}', {"X-Vaultlet": None}), 403)

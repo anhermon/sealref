@@ -3,7 +3,9 @@
 No route ever returns a secret value. store.py's value-reading functions
 (_resolve, _resolve_group) are never imported here.
 """
+import hmac
 import json
+import secrets
 import subprocess
 import sys
 import threading
@@ -30,7 +32,17 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "sealref/1"
 
     def log_message(self, fmt, *args):
-        pass  # Known limit: silence default access log, personal tool
+        pass  # no access log: request lines would land in the MCP client's stderr log
+
+    def end_headers(self):
+        # Not frameable (clickjacking), no MIME sniffing, nothing cached or
+        # sent on as a Referer.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
 
     def _json(self, status, payload):
         body = json.dumps(payload).encode()
@@ -54,8 +66,11 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(raw or b"{}")
 
     def _allowed(self):
-        """Reject DNS-rebinding (bad Host) and cross-site requests (bad Origin,
-        non-JSON bodies). Everything here is local-only, so be strict."""
+        """Reject DNS-rebinding (bad Host), cross-site requests (bad Origin)
+        and any API call without this server's token. The token is the
+        X-Vaultlet header value: a custom header forces a CORS preflight,
+        which we never grant, and the token stops other local programs and
+        other users of this Mac, who can all reach 127.0.0.1."""
         port = self.server.server_port
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         if self.headers.get("Host") not in hosts:
@@ -63,9 +78,10 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin is not None and origin not in {f"http://{h}" for h in hosts}:
             return False
-        if self.command in ("POST", "DELETE") and self.headers.get("X-Vaultlet") != "1":
-            return False  # custom header forces a CORS preflight, which we never grant
-        return True
+        if urlparse(self.path).path == "/":
+            return self.command == "GET"  # the page itself holds no data
+        sent = self.headers.get("X-Vaultlet") or ""
+        return hmac.compare_digest(sent.encode(), self.server.token.encode())
 
     def do_GET(self):
         if not self._allowed():
@@ -92,7 +108,8 @@ class Handler(BaseHTTPRequestHandler):
                 store.create_group(body["group"])
                 self._json(200, {"ok": True})
             elif path == "/api/keys":
-                store.set_secret(body["group"], body["key"], body["value"])
+                store.set_secret(body["group"], body["key"], body["value"],
+                                 require_approval=body.get("require_approval") is True)
                 self._json(200, {"ok": True})
             else:
                 self._json(404, {"error": "not found"})
@@ -145,12 +162,14 @@ def _open_browser(url):
 
 
 def _make_server(port):
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.token = secrets.token_urlsafe(32)
+    return server
 
 
 def serve(port=8765):
     server = _make_server(port)
-    url = f"http://127.0.0.1:{server.server_port}/"
+    url = f"http://127.0.0.1:{server.server_port}/#t={server.token}"
     print(f"sealref: serving on {url}", file=sys.stderr)
     _open_browser(url)
     try:
@@ -167,7 +186,9 @@ def serve_until(group, key, reason, timeout=300):
     q = f"?group={quote(group)}&key={quote(key)}"
     if reason:
         q += f"&reason={quote(reason)}"
-    url = f"http://127.0.0.1:{server.server_port}/{q}"
+    # The token rides in the #fragment: browsers never send it to a server
+    # or in a Referer.
+    url = f"http://127.0.0.1:{server.server_port}/{q}#t={server.token}"
     # stderr, not stdout: when called from the MCP server, stdout is the
     # JSON-RPC transport.
     print(f"sealref: serving on {url}", file=sys.stderr)
@@ -242,6 +263,7 @@ PAGE = """<!doctype html>
     border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .new-group { display: flex; gap: 8px; margin-bottom: 24px; }
   .new-group input { flex: 1; }
+  .approve { flex-basis: 100%; color: var(--muted); font-size: 13px; }
   .pw-wrap { display: flex; gap: 4px; align-items: center; flex: 1; min-width: 140px; }
 </style>
 </head>
@@ -262,6 +284,7 @@ const params = new URLSearchParams(location.search);
 const focusGroup = params.get('group');
 const focusKey = params.get('key');
 const reason = params.get('reason');
+const token = new URLSearchParams(location.hash.slice(1)).get('t') || '';
 
 if (reason) {
   document.getElementById('banner').innerHTML =
@@ -282,7 +305,7 @@ function toast(msg, isErr) {
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: body ? {'Content-Type': 'application/json', 'X-Vaultlet': '1'} : {'X-Vaultlet': '1'},
+    headers: body ? {'Content-Type': 'application/json', 'X-Vaultlet': token} : {'X-Vaultlet': token},
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -346,6 +369,7 @@ function renderGroup(g) {
     delBtn.className = 'danger';
     delBtn.textContent = 'Delete';
     delBtn.onclick = async () => {
+      if (!confirm(`Delete ${g.name}/${k.key}?`)) return;
       try { await api('DELETE', `/api/keys/${encodeURIComponent(g.name)}/${encodeURIComponent(k.key)}`); toast('Key deleted'); load(); }
       catch (e) { toast(e.message, true); }
     };
@@ -358,12 +382,14 @@ function renderGroup(g) {
   addRow.className = 'add-key';
   const isFocus = g.name === focusGroup;
   addRow.innerHTML = `
-    <input type="text" placeholder="key name" class="key-input" value="${isFocus && focusKey ? escapeHtml(focusKey) : ''}">
+    <input type="text" placeholder="key name" class="key-input" autocomplete="off" spellcheck="false" value="${isFocus && focusKey ? escapeHtml(focusKey) : ''}">
     <span class="pw-wrap">
-      <input type="password" placeholder="value" class="val-input" ${isFocus ? `data-focus="${escapeHtml(g.name + '/' + focusKey)}"` : ''}>
+      <input type="password" placeholder="value" class="val-input" autocomplete="off" spellcheck="false" autocorrect="off" autocapitalize="off" ${isFocus ? `data-focus="${escapeHtml(g.name + '/' + focusKey)}"` : ''}>
       <button type="button" class="show-btn">show</button>
     </span>
     <button class="primary add-btn">Save</button>
+    <label class="approve"><input type="checkbox" class="approve-input">
+      Ask me in a macOS Keychain dialog every time this secret is read</label>
   `;
   const keyInput = addRow.querySelector('.key-input');
   const valInput = addRow.querySelector('.val-input');
@@ -376,7 +402,8 @@ function renderGroup(g) {
     const value = valInput.value;
     if (!key || !value) { toast('Key and value are required', true); return; }
     try {
-      await api('POST', '/api/keys', {group: g.name, key, value});
+      const require_approval = addRow.querySelector('.approve-input').checked;
+      await api('POST', '/api/keys', {group: g.name, key, value, require_approval});
       toast('Saved');
       load();
     } catch (e) { toast(e.message, true); }
