@@ -1,20 +1,88 @@
 # sealref
 
-A local, macOS Keychain-backed secret store for AI coding agents: the agent
-works with references like `sealref://stripe/API_KEY`, and the key itself stays
-out of the chat.
+Give AI coding agents (Claude Code, Cursor, any MCP client) API keys and
+secrets without pasting them into chat: the agent works with references like
+`sealref://stripe/API_KEY`, and the key itself stays in your macOS Keychain.
+sealref is a local CLI plus an MCP server for secrets.
 
 ## Why
 
 When an agent needs an API token, the quickest thing to do is paste it into the
 chat. From then on it is part of the transcript: saved in the agent's session
 history, sent to the model provider with every later request, and kept in
-whatever logs and history are retained on either side.
+whatever logs, traces and history are retained on either side.
 
 The indirect routes avoid that, but they are tedious. You write the key into a
 `.env` file (which the agent can still read back into the chat), export it in
 the shell before starting the agent, copy it by hand into each command, or set
 up a vault CLI and wire it into every command the agent runs.
+
+With sealref the agent only ever holds a `sealref://` ref. You type the value
+once into a local page, it goes into the Keychain, and `sealref run` injects it
+into the one command that needs it and scrubs it from that command's output.
+
+## Quickstart (3 steps)
+
+Requires macOS and Python 3; the MCP server runs through `uv`.
+
+1. Install:
+
+   ```sh
+   git clone https://github.com/anhermon/sealref ~/src/sealref
+   ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # or add bin/ to PATH
+   brew install uv                                          # for the MCP server
+   ```
+
+2. Register the MCP server with your agent (Claude Code shown; see
+   [MCP setup](#mcp-setup-claude-code) for the `.mcp.json` form):
+
+   ```sh
+   claude mcp add sealref --scope user -- \
+     uv run --directory ~/src/sealref --with "mcp==1.29.0" \
+     python -m sealref.mcp_server
+   ```
+
+3. Ask your agent to use a secret. It calls `request_secret`, a local page opens
+   for you to type the value, and the agent runs its command through sealref:
+
+   ```sh
+   sealref run --ref sealref://stripe/API_KEY -- sh -c 'curl -s https://api.stripe.com/v1/balance -u "$API_KEY:"'
+   ```
+
+## FAQ
+
+**How do I keep secrets out of Claude Code's context?**
+Register the sealref MCP server and have the agent use `request_secret` and
+`sealref run` instead of asking you to paste a key. The value goes from a
+browser form on 127.0.0.1 into the Keychain, and the agent only receives
+`sealref://group/KEY` refs. Output that echoes the key (raw, base64 or
+URL-encoded, line by line) is replaced by `«redacted:group/KEY»`.
+
+**Is there an MCP server for secrets that never shows the value to the model?**
+Yes: `python -m sealref.mcp_server` exposes `list_groups`, `list_keys`,
+`has_secret`, `request_secret` and `usage_hint`. None of them returns a value,
+and there is no tool or CLI command that prints one.
+
+**Does it work with Cursor or other MCP clients?**
+The server is a standard stdio MCP server, so any client that can launch a
+stdio command can use it with the same `command`/`args` as in the `.mcp.json`
+below. Only the Claude Code setup has been written up here; I have not tested
+other clients.
+
+**Can I use `.env` files or `export` instead?**
+You can, but the agent can read a `.env` file back into the chat, and exported
+variables are visible to everything it runs. sealref keeps the value in the
+Keychain and puts it only into the environment of the one child process.
+
+**What does it not protect against?**
+An agent that is actively trying to get the value. See the limits below and the
+[Threat model](#threat-model).
+
+## Limits
+
+macOS Keychain only (no Linux or Windows backend), single user, no team
+sharing, audit log or rotation, and redaction is best-effort and line-based.
+It guards against accidental leaks into transcripts, not a hostile agent.
 
 ## How sealref fixes it
 
@@ -76,7 +144,7 @@ ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # or add bin/ to PATH
 brew install uv                                              # for the MCP server
 ```
 
-## Quickstart
+## CLI basics
 
 ```sh
 sealref ui                       # open the local page, create a group, add keys
