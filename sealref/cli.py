@@ -42,11 +42,26 @@ def _build_needles(secrets):
             )
             continue
         replacement = f"«redacted:{group}/{key}»"
+        raw = value.encode()
         variants = {
             value,
-            base64.b64encode(value.encode()).decode(),
             urllib.parse.quote(value, safe=""),
+            raw.hex(),
+            raw.hex().upper(),
         }
+        # base64 of the value at each of the 3 alignments, so it is also found
+        # inside a longer encoded string such as Basic auth's base64("user:" +
+        # value). Only the characters that depend on the value alone are kept.
+        for shift in range(3):
+            for enc in (base64.b64encode, base64.urlsafe_b64encode):
+                full = enc(b"\0" * shift + raw).decode()
+                start = -(-shift * 4 // 3)  # skip chars mixed with the prefix
+                end = (shift + len(raw)) * 4 // 3  # drop chars mixed with what follows
+                core = full[start:end]
+                if len(core) >= REDACT_MIN_LEN:
+                    variants.add(core)
+            if shift == 0:
+                variants.add(base64.b64encode(raw).decode())
         for v in variants:
             needles.append((v, replacement))
     needles.sort(key=lambda pair: len(pair[0]), reverse=True)
@@ -178,10 +193,9 @@ def cmd_run(rest):
 
     needles = _build_needles(secrets)
 
-    # Known limit: line-buffered redaction. A value split across a line boundary,
-    # or emitted without a trailing newline right at a read chunk edge, can
-    # slip through unredacted. Upgrade to a rolling-buffer scanner if that
-    # ever bites for this personal tool.
+    # Known limit: redaction is per line. Lines are whole lines however the
+    # child's writes are chunked, but a value split across two lines (or
+    # transformed in a way not listed in _build_needles) is not caught.
     proc = subprocess.Popen(
         child_cmd,
         env=env,
@@ -240,6 +254,6 @@ def main(argv=None):
         return 2
     try:
         return handler(rest)
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2

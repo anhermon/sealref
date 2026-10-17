@@ -382,6 +382,47 @@ class UiGuardTest(unittest.TestCase):
         self.assertEqual(self._req("DELETE", "/api/groups/a%20b"), 400)
 
 
+class RedactionGapsTest(unittest.TestCase):
+    def test_basic_auth_base64_any_alignment_and_hex(self):
+        import base64
+        value = "sk-test-DUMMY0123456789"
+        needles = _build_needles([("g", "K", value)])
+        for user in ("", "x", "ab", "user", "someone@example.com"):
+            for enc in (base64.b64encode, base64.urlsafe_b64encode):
+                line = enc(f"{user}:{value}".encode()).decode() + "\n"
+                self.assertIn("«redacted:g/K»", _redact_line(line, needles), user)
+        for h in (value.encode().hex(), value.encode().hex().upper()):
+            self.assertNotIn(h, _redact_line(f"hex {h}\n", needles))
+
+    def _run_child(self, script):
+        import contextlib
+        import io
+        from sealref import cli
+        buf = io.StringIO()
+        with mock.patch.object(store, "_resolve", return_value="sk-test-DUMMY0123456789"), \
+                contextlib.redirect_stdout(buf):
+            rc = cli.cmd_run(["--ref", "sealref://g/K", "--", "sh", "-c", script])
+        return rc, buf.getvalue()
+
+    def test_long_line_and_missing_final_newline(self):
+        rc, out = self._run_child('head -c 70000 /dev/zero | tr "\\0" x; printf %s "$K"')
+        self.assertNotIn("DUMMY", out)
+        self.assertIn("«redacted:g/K»", out)
+
+    def test_keychain_read_failure_is_a_clean_error(self):
+        import contextlib
+        import io
+        from sealref import cli
+        failed = mock.Mock(returncode=128, stdout="", stderr="")
+        err = io.StringIO()
+        with mock.patch("sealref.store.subprocess.run", return_value=failed), \
+                contextlib.redirect_stderr(err):
+            rc = cli.main(["run", "--ref", "sealref://g/K", "--", "true"])
+        self.assertEqual(rc, 2)
+        self.assertIn("keychain read of g/K failed or was denied", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+
 class RunAcceptsBothSchemesTest(unittest.TestCase):
     """`run --ref` resolves sealref:// and legacy vaultlet:// refs to the same
     Keychain item and injects the value."""
