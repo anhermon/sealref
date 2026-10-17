@@ -65,8 +65,8 @@ and there is no tool or CLI command that prints one.
 
 **Does it work with Cursor or other MCP clients?**
 The server is a standard stdio MCP server, so any client that can launch a
-stdio command can use it with the same `command`/`args` as in the `.mcp.json`
-below. Only the Claude Code setup has been written up here; I have not tested
+stdio command can use it with the same `command`/`args` as in the `.mcp.json` under
+[MCP setup](#mcp-setup-claude-code). Only the Claude Code setup has been written up here; I have not tested
 other clients.
 
 **Can I use `.env` files or `export` instead?**
