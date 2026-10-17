@@ -1,7 +1,15 @@
 #!/bin/sh
 # Resolve the package dir from this script's real location so sealref works
-# from any cwd, and through a symlink on PATH.
+# from any cwd, and through a symlink on PATH (absolute or relative).
 self=$0
-while [ -L "$self" ]; do self=$(readlink "$self"); done
-root=$(cd "$(dirname "$self")/.." && pwd)
-PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m sealref "$@"
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case $target in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;  # relative to the link's own dir
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P) || exit 1
+# -I: never put the cwd (or PYTHONPATH, user site-packages) on sys.path, so a
+# json.py or sealref/ planted in the directory you run from is not imported.
+exec python3 -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("sealref", run_name="__main__", alter_sys=True)' "$root" "$@"

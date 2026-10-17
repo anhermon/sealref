@@ -71,6 +71,24 @@ class CommandNameTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0)
             self.assertIn(f"usage: {prog} ", r.stdout)
 
+    def test_bin_script_ignores_cwd_modules_and_relative_symlink(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "work", "sealref"))
+        with open(os.path.join(tmp, "work", "json.py"), "w") as f:
+            f.write('raise SystemExit("PLANTED json.py RAN")\n')
+        with open(os.path.join(tmp, "work", "sealref", "__init__.py"), "w") as f:
+            f.write('raise SystemExit("PLANTED sealref RAN")\n')
+        os.makedirs(os.path.join(tmp, "links"))
+        link = os.path.join(tmp, "links", "sealref")
+        os.symlink(os.path.relpath(os.path.join(self.ROOT, "bin", "sealref"), os.path.dirname(link)), link)
+        for exe in (os.path.join(self.ROOT, "bin", "sealref"), link):
+            r = subprocess.run([exe, "--help"], capture_output=True, text=True,
+                               cwd=os.path.join(tmp, "work"))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("usage: sealref ", r.stdout)
+            self.assertNotIn("PLANTED", r.stdout + r.stderr)
+
     def test_bin_scripts(self):
         for name in ("sealref", "vaultlet"):
             r = subprocess.run([os.path.join(self.ROOT, "bin", name), "--help"], capture_output=True, text=True)
