@@ -49,6 +49,7 @@ class SchemeTest(unittest.TestCase):
     def test_keychain_service_name_unchanged(self):
         with mock.patch("sealref.store.subprocess.run") as run:
             run.return_value.stdout = "v\n"
+            run.return_value.returncode = 0
             store._resolve("g", "K")
             self.assertIn("vaultlet:g", run.call_args[0][0])
 
@@ -199,6 +200,46 @@ class NameValidationTest(unittest.TestCase):
         for bad in ["", "a\nb", "a\0b"]:
             with self.assertRaises(ValueError):
                 store.set_secret("g", "K", bad)
+
+    @mock.patch("sealref.store.subprocess.run")
+    def test_set_secret_one_command_per_line(self, mock_run):
+        """security -i runs each ~4 KB chunk of an over-long line as its own
+        command, and splits on control characters: reject both before
+        anything reaches it."""
+        for bad in ["x" * 3000, "é" * 1500, "a\tb", "a\x0bb", "a\x1bb", "a\x7fb", 42, None]:
+            with self.assertRaises(ValueError):
+                store.set_secret("g", "K", bad)
+        mock_run.assert_not_called()
+        mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        store.set_secret("g", "K", "v" * 2800)
+        script = mock_run.call_args[1]["input"]
+        lines = script.splitlines()
+        self.assertEqual([l.split()[0] for l in lines],
+                         ["delete-generic-password", "add-generic-password"])
+        self.assertTrue(all(len(l.encode()) <= store.MAX_COMMAND_BYTES for l in lines))
+        self.assertNotIn(' -T ""', script)
+
+    @mock.patch("sealref.store.subprocess.run")
+    def test_set_secret_require_approval_empty_acl(self, mock_run):
+        mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        store.set_secret("g", "K", "value", require_approval=True)
+        add = mock_run.call_args[1]["input"].splitlines()[1]
+        self.assertTrue(add.endswith(' -w "value" -T ""'), add)
+
+    @mock.patch("sealref.store.subprocess.run")
+    def test_set_secret_missing_item_delete_is_not_failure(self, mock_run):
+        mock_run.return_value = mock.Mock(
+            returncode=0, stdout="", stderr="delete-generic-password: returned -25300\n")
+        store.set_secret("g", "K", "value")
+        mock_run.return_value = mock.Mock(
+            returncode=0, stdout="", stderr="add-generic-password: returned -128\n")
+        with self.assertRaises(RuntimeError):
+            store.set_secret("g", "K", "value")
+
+    def test_vault_dir_mode_repaired(self):
+        os.chmod(self.tmpdir, 0o755)
+        store.create_group("g")
+        self.assertEqual(os.stat(self.tmpdir).st_mode & 0o777, 0o700)
 
     def test_delete_validates_names(self):
         with self.assertRaises(ValueError):

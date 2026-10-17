@@ -34,6 +34,7 @@ def _load_index() -> dict:
 
 def _save_index(index: dict) -> None:
     os.makedirs(VAULT_DIR, mode=0o700, exist_ok=True)
+    os.chmod(VAULT_DIR, 0o700)  # also repairs dirs made 0755 by old versions
     tmp_path = INDEX_PATH + ".tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -90,18 +91,38 @@ def parse_ref(s: str) -> tuple:
     return group, key
 
 
-def set_secret(group: str, key: str, value: str) -> str:
+# `security -i` reads stdin in fixed-size chunks and runs each chunk as its own
+# command line once a line passes ~4 KB (measured), so a long value would no
+# longer be one quoted argument. Keep the whole line well under that.
+MAX_COMMAND_BYTES = 3000
+
+
+def set_secret(group: str, key: str, value: str, require_approval: bool = False) -> str:
     _validate_group(group)
     _validate_key(key)
-    if not value or any(c in value for c in "\n\r\0"):
-        raise ValueError("value must be non-empty and contain no newline or NUL")
+    if not isinstance(value, str) or not value:
+        raise ValueError("value must be a non-empty string")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        raise ValueError("value must not contain control characters (newline, tab, NUL, ...)")
     # The value goes to `security -i` on stdin, not argv, so it never appears
     # in `ps` output. security's command parser takes double-quoted strings
-    # with backslash escapes. Limit: values containing newlines are rejected.
+    # with backslash escapes.
     esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
-    cmd = f'add-generic-password -a "{esc(key)}" -s "vaultlet:{esc(group)}" -w "{esc(value)}" -U\n'
+    # -T "" = no app is trusted to read the item without asking, so every
+    # read (sealref's own and anyone else's `security find-generic-password`)
+    # raises a macOS approval dialog.
+    acl = ' -T ""' if require_approval else ""
+    item = f'-a "{esc(key)}" -s "vaultlet:{esc(group)}"'
+    # Delete then add, not `add -U`: updating an item whose ACL trusts no app
+    # raises a Keychain dialog, and -U cannot switch an item's ACL either way.
+    cmd = (f'delete-generic-password {item}\n'
+           f'add-generic-password {item} -w "{esc(value)}"{acl}\n')
+    if max(len(line.encode()) for line in cmd.splitlines()) > MAX_COMMAND_BYTES:
+        raise ValueError("value too long (sealref stores values up to about 2900 bytes)")
     r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True)
-    if r.returncode != 0 or "returned -" in r.stdout + r.stderr:
+    # A missing item makes the delete line report "returned -25300"; only the
+    # add line decides success.
+    if r.returncode != 0 or "add-generic-password: returned" in r.stdout + r.stderr:
         raise RuntimeError("keychain write failed (security exit %d)" % r.returncode)
     index = _load_index()
     index["groups"].setdefault(group, {"keys": {}})
@@ -134,13 +155,24 @@ def delete_group(group: str) -> None:
     _save_index(index)
 
 
+RESOLVE_TIMEOUT = 120  # long enough to answer a Keychain approval dialog
+
+
 def _resolve(group: str, key: str) -> str:
-    result = subprocess.run(
-        ["security", "find-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w"],
+            capture_output=True,
+            text=True,
+            timeout=RESOLVE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"keychain read of {group}/{key} timed out; "
+                           "approve the macOS Keychain dialog to use this secret") from None
+    if result.returncode != 0:
+        # stderr from find-generic-password names the item, never the value.
+        raise RuntimeError(f"keychain read of {group}/{key} failed or was denied "
+                           f"(security exit {result.returncode})")
     return result.stdout.rstrip("\n")
 
 
