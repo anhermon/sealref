@@ -1,0 +1,45 @@
+
+== 1. Human stores the secret ONCE (hidden prompt; never typed into chat)
+$ sealref set demo API_KEY      # prompt hidden; demo pipes the fake value
+sealref://demo/API_KEY
+
+== 2. The agent only ever sees the ref
+$ sealref keys demo
+API_KEY  sealref://demo/API_KEY
+
+== 3+4. 'sealref run' injects it into the command's env; output is scrubbed
+$ sealref run --ref sealref://demo/API_KEY -- sh -c 'echo "Authorization: Bearer $API_KEY"; env | grep API_KEY'
+Authorization: Bearer «redacted:demo/API_KEY»
+API_KEY=«redacted:demo/API_KEY»
+$ # the command really had the value (length only):
+len=33
+$ # the base64 form is scrubbed too (URL-encoded as well):
+«redacted:demo/API_KEY»
+
+== 5. What lands in the transcript
+  PASTE IN CHAT                              (all of this is in the transcript)
+    user : here is my key: sk-demo-FAKE-9f3a1c7e5b2d4806a1f0
+    agent: curl -H "Authorization: Bearer sk-demo-FAKE-9f3a1c7e5b2d4806a1f0" ...
+    tool : {"auth":"sk-demo-FAKE-9f3a1c7e5b2d4806a1f0"}
+    + shell history, logs, context window re-sent every turn, provider logs
+
+  SEALREF                                    (the value appears nowhere)
+    user : (typed into a hidden prompt, not chat)
+    agent: sealref run --ref sealref://demo/API_KEY -- curl ...
+    tool : {"auth":"«redacted:demo/API_KEY»"}
+    value lives only in the OS keystore
+
+== 6. Agent usage (MCP, Claude Code)
+  claude mcp add sealref --scope user -- uv run --directory /path/to/sealref \
+      --with "mcp==1.29.0" python -m sealref.mcp_server
+  agent calls: has_secret("stripe","API_KEY") -> true
+               request_secret("stripe","API_KEY","charge test") -> "sealref://stripe/API_KEY"
+  agent runs : sealref run --ref sealref://stripe/API_KEY -- ./charge.sh
+
+== 7. Honest limit: scrubbing is exact-match, not magic
+$ sealref run ... -- sh -c 'echo $API_KEY | rev'
+0f1a6084d2b5e7c1a3f9-EKAF-omed-ks
+  ^ a transformed value gets through. sealref stops accidents, not a hostile agent.
+
+== Cleanup
+remaining demo keys: 0

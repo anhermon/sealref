@@ -16,6 +16,7 @@ from urllib.parse import quote, unquote, urlparse
 from . import store
 
 MASK = "•" * 8
+MAX_BODY = 64 * 1024  # a secret is at most a few KB; refuse to buffer more
 
 
 def _group_view(group):
@@ -61,7 +62,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _body_json(self):
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            raise ValueError("bad Content-Length")
+        if length < 0 or length > MAX_BODY:
+            raise ValueError(f"request body too large (max {MAX_BODY} bytes)")
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw or b"{}")
 
@@ -100,6 +106,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/quit":
             self._json(200, {"ok": True})
+            self.server.quit.set()  # ends a pending request_secret right away
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         try:
@@ -166,6 +173,7 @@ def _open_browser(url):
 def _make_server(port):
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.token = secrets.token_urlsafe(32)
+    server.quit = threading.Event()
     return server
 
 
@@ -203,7 +211,9 @@ def serve_until(group, key, reason, timeout=300):
         if store.has(group, key):
             found = True
             break
-        time.sleep(0.3)
+        if server.quit.wait(0.3):  # the page's Quit button: stop waiting now
+            found = store.has(group, key)
+            break
     server.shutdown()
     server.server_close()
     thread.join(timeout=5)

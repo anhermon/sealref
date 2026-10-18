@@ -1,6 +1,7 @@
 """CLI entry points."""
 import base64
 import os
+import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -19,6 +20,7 @@ commands:
   groups
   keys <group>
   ui [--port N]
+  set <group> <key>      (hidden prompt; or pipe the value on stdin)
   request <group> <key> [--reason TEXT]
   run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 
@@ -88,6 +90,20 @@ def cmd_keys(rest):
     group = rest[0]
     for key in store.list_keys(group):
         print(f"{key}  {store.ref(group, key)}")
+    return 0
+
+
+def cmd_set(rest):
+    if len(rest) != 2:
+        print(f"{PROG}: usage: {PROG} set <group> <key>", file=sys.stderr)
+        return 2
+    group, key = rest
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass(f"value for {group}/{key} (hidden): ")
+    else:
+        value = sys.stdin.read().rstrip("\r\n")  # piped: keeps the value out of argv and history
+    print(store.set_secret(group, key, value))
     return 0
 
 
@@ -174,8 +190,6 @@ def cmd_run(rest):
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2
 
-    import os
-
     env = os.environ.copy()
     secrets = []  # (group, key, value)
 
@@ -194,19 +208,29 @@ def cmd_run(rest):
         secrets.append((group, key, value))
 
     needles = _build_needles(secrets)
+    # «redacted:...» is not encodable in every Windows console code page.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
 
     # Known limit: redaction is per line. Lines are whole lines however the
     # child's writes are chunked, but a value split across two lines (or
     # transformed in a way not listed in _build_needles) is not caught.
-    proc = subprocess.Popen(
-        child_cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        bufsize=1,
-    )
+    if sys.platform == "win32":
+        # CreateProcess does not search PATHEXT, so `npm` (npm.cmd) would not start.
+        child_cmd = [shutil.which(child_cmd[0], path=env.get("PATH")) or child_cmd[0], *child_cmd[1:]]
+    try:
+        proc = subprocess.Popen(
+            child_cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as e:
+        print(f"{PROG}: cannot run {child_cmd[0]!r}: {e.strerror or type(e).__name__}", file=sys.stderr)
+        return 127 if isinstance(e, FileNotFoundError) else 126
     try:
         with proc.stdout:
             for line in proc.stdout:
@@ -217,12 +241,14 @@ def cmd_run(rest):
         proc.terminate()
         proc.wait()
         return 130
-    return proc.returncode
+    # POSIX: death by signal N is returncode -N; report it as the shell does, 128+N.
+    return 128 - proc.returncode if proc.returncode < 0 else proc.returncode
 
 
 COMMANDS = {
     "groups": cmd_groups,
     "keys": cmd_keys,
+    "set": cmd_set,
     "ui": cmd_ui,
     "request": cmd_request,
     "run": cmd_run,

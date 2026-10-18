@@ -1,20 +1,19 @@
-"""Index (~/.vaultlet/index.json) + macOS Keychain storage.
+"""Index (~/.vaultlet/index.json) + pluggable secret backend (see backends.py).
 
 Storage names stay "vaultlet" (dir ~/.vaultlet, Keychain service "vaultlet:<group>")
 so existing installs need no migration."""
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401  (tests patch store.subprocess.run, the same module backends uses)
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
-VAULT_DIR = os.path.expanduser("~/.vaultlet")
+from .backends import CONTROL_ERR, _has_control, get_backend
+
+VAULT_DIR = os.path.join(str(Path.home()), ".vaultlet")  # same place on every OS
 INDEX_PATH = os.path.join(VAULT_DIR, "index.json")
-
-# Absolute path: a `security` earlier on PATH (a repo's bin/, a direnv
-# .envrc) would otherwise receive every value set_secret writes.
-SECURITY = "/usr/bin/security"
 
 GROUP_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -39,7 +38,7 @@ def _load_index() -> dict:
 
 def _save_index(index: dict) -> None:
     os.makedirs(VAULT_DIR, mode=0o700, exist_ok=True)
-    os.chmod(VAULT_DIR, 0o700)  # also repairs dirs made 0755 by old versions
+    os.chmod(VAULT_DIR, 0o700)  # repairs old 0755 dirs; no-op beyond the read-only bit on Windows (profile ACLs apply)
     # Unique, O_EXCL, 0600: no fixed name to pre-plant a symlink at, and two
     # writers (UI thread + MCP) never share a temp file.
     fd, tmp_path = tempfile.mkstemp(dir=VAULT_DIR, prefix=".index.", suffix=".tmp")
@@ -97,39 +96,21 @@ def parse_ref(s: str) -> tuple:
     return group, key
 
 
-# `security -i` reads stdin in fixed-size chunks and runs each chunk as its own
-# command line once a line passes ~4 KB (measured), so a long value would no
-# longer be one quoted argument. Keep the whole line well under that.
-MAX_COMMAND_BYTES = 3000
-
-
 def set_secret(group: str, key: str, value: str, require_approval: bool = False) -> str:
     _validate_group(group)
     _validate_key(key)
     if not isinstance(value, str) or not value:
         raise ValueError("value must be a non-empty string")
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
-        raise ValueError("value must not contain control characters (newline, tab, NUL, ...)")
-    # The value goes to `security -i` on stdin, not argv, so it never appears
-    # in `ps` output. security's command parser takes double-quoted strings
-    # with backslash escapes.
-    esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
-    # -T "" = no app is trusted to read the item without asking, so every
-    # read (sealref's own and anyone else's `security find-generic-password`)
-    # raises a macOS approval dialog.
-    acl = ' -T ""' if require_approval else ""
-    item = f'-a "{esc(key)}" -s "vaultlet:{esc(group)}"'
-    # Delete then add, not `add -U`: updating an item whose ACL trusts no app
-    # raises a Keychain dialog, and -U cannot switch an item's ACL either way.
-    cmd = (f'delete-generic-password {item}\n'
-           f'add-generic-password {item} -w "{esc(value)}"{acl}\n')
-    if max(len(line.encode()) for line in cmd.splitlines()) > MAX_COMMAND_BYTES:
-        raise ValueError("value too long (sealref stores values up to about 2900 bytes)")
-    r = subprocess.run([SECURITY, "-i"], input=cmd, capture_output=True, text=True)
-    # A missing item makes the delete line report "returned -25300"; only the
-    # add line decides success.
-    if r.returncode != 0 or "add-generic-password: returned" in r.stdout + r.stderr:
-        raise RuntimeError("keychain write failed (security exit %d)" % r.returncode)
+    if _has_control(value):
+        raise ValueError(f"value {CONTROL_ERR}")
+    try:
+        get_backend().set(group, key, value, require_approval=require_approval)
+    except RuntimeError as e:
+        if getattr(e, "old_value_lost", False):  # keep the index truthful
+            index = _load_index()
+            index["groups"].get(group, {}).get("keys", {}).pop(key, None)
+            _save_index(index)
+        raise
     index = _load_index()
     index["groups"].setdefault(group, {"keys": {}})
     index["groups"][group]["keys"][key] = {
@@ -142,14 +123,7 @@ def set_secret(group: str, key: str, value: str, require_approval: bool = False)
 def delete(group: str, key: str) -> None:
     _validate_group(group)
     _validate_key(key)
-    r = subprocess.run(
-        [SECURITY, "delete-generic-password", "-a", key, "-s", f"vaultlet:{group}"],
-        capture_output=True,
-    )
-    # 44 = errSecItemNotFound: already gone. Anything else means the value may
-    # still be in the Keychain, so keep its index entry visible.
-    if r.returncode not in (0, 44):
-        raise RuntimeError(f"keychain delete of {group}/{key} failed (security exit {r.returncode})")
+    get_backend().delete(group, key)  # raises if the value may still exist
     index = _load_index()
     if group in index["groups"]:
         index["groups"][group]["keys"].pop(key, None)
@@ -165,25 +139,8 @@ def delete_group(group: str) -> None:
     _save_index(index)
 
 
-RESOLVE_TIMEOUT = 120  # long enough to answer a Keychain approval dialog
-
-
 def _resolve(group: str, key: str) -> str:
-    try:
-        result = subprocess.run(
-            [SECURITY, "find-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w"],
-            capture_output=True,
-            text=True,
-            timeout=RESOLVE_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"keychain read of {group}/{key} timed out; "
-                           "approve the macOS Keychain dialog to use this secret") from None
-    if result.returncode != 0:
-        # stderr from find-generic-password names the item, never the value.
-        raise RuntimeError(f"keychain read of {group}/{key} failed or was denied "
-                           f"(security exit {result.returncode})")
-    return result.stdout.rstrip("\n")
+    return get_backend().get(group, key)
 
 
 def _resolve_group(group: str) -> dict:

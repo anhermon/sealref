@@ -9,7 +9,9 @@ from unittest import mock
 import subprocess
 import sys
 
-from sealref import store
+os.environ.setdefault("SEALREF_BACKEND", "macos")  # most tests mock `security`
+os.environ.pop("SEALREF_KEYCHAIN", None)  # never inherit a keychain file into the mocked tests
+from sealref import store, backends
 from sealref.cli import _build_needles, _redact_line
 
 
@@ -216,7 +218,7 @@ class NameValidationTest(unittest.TestCase):
         lines = script.splitlines()
         self.assertEqual([l.split()[0] for l in lines],
                          ["delete-generic-password", "add-generic-password"])
-        self.assertTrue(all(len(l.encode()) <= store.MAX_COMMAND_BYTES for l in lines))
+        self.assertTrue(all(len(l.encode()) <= backends.MAX_COMMAND_BYTES for l in lines))
         self.assertNotIn(' -T ""', script)
 
     @mock.patch("sealref.store.subprocess.run")
