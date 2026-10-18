@@ -42,8 +42,6 @@ jobs:
           '
 
   windows:
-    # Not run by the author (no Windows machine, nothing pushed): first CI run
-    # on a pushed branch is the first time this job executes.
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -59,10 +57,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install '.[keyring]'
       - run: python -m unittest -v test_sealref
-      - name: Credential Manager round trip (dummy value)
-        run: |
-          echo dummy-ci-value-123 | sealref set ci CI_KEY
-          sealref run --ref sealref://ci/CI_KEY -- python -c "import os; print(os.environ['CI_KEY'])" | tee out.txt
-          grep -q "redacted:ci/CI_KEY" out.txt
-          if grep -q dummy-ci-value-123 out.txt; then echo "value leaked"; exit 1; fi
-          python -c "from sealref import store; store.delete('ci','CI_KEY')"
+      - name: Credential Manager end to end (dummy values)
+        run: python tests/windows/e2e.py

@@ -147,9 +147,9 @@ class CommandNameTest(unittest.TestCase):
         with open(os.path.join(home, ".vaultlet", "index.json"), "w") as f:
             json.dump({"groups": {"g": {"keys": {"API_KEY": {}}}}}, f)
         for mod in ("sealref", "vaultlet"):
-            r = self._run("-m", mod, "keys", "g", env={"HOME": home})
+            r = self._run("-m", mod, "keys", "g", env={"HOME": home, "USERPROFILE": home})
             self.assertEqual(r.stdout, "API_KEY  sealref://g/API_KEY\n", mod)
-            r = self._run("-m", mod, "keys", "g", env={"HOME": home, "SEALREF_REF_SCHEME": "vaultlet"})
+            r = self._run("-m", mod, "keys", "g", env={"HOME": home, "USERPROFILE": home, "SEALREF_REF_SCHEME": "vaultlet"})
             self.assertEqual(r.stdout, "API_KEY  vaultlet://g/API_KEY\n", mod)
 
     def test_mcp_alias_module_importable(self):
@@ -563,7 +563,6 @@ class RunAcceptsBothSchemesTest(unittest.TestCase):
     """`run --ref` resolves sealref:// and legacy vaultlet:// refs to the same
     Keychain item and injects the value."""
 
-    @POSIX_ONLY
     def test_both_schemes_resolve(self):
         import contextlib
         import gc
@@ -576,8 +575,8 @@ class RunAcceptsBothSchemesTest(unittest.TestCase):
                 warnings.simplefilter("always", ResourceWarning)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = cli.cmd_run(["--ref", f"{scheme}://stripe/API_KEY", "--",
-                                      "sh", "-c", 'echo "len=${#API_KEY} val=$API_KEY"'])
+                    rc = cli.cmd_run(["--ref", f"{scheme}://stripe/API_KEY", "--", sys.executable, "-c",
+                                      'import os; v = os.environ["API_KEY"]; print("len=%d val=%s" % (len(v), v))'])
                 gc.collect()
             self.assertEqual([w for w in caught if issubclass(w.category, ResourceWarning)], [],
                              "child output pipe left open")
@@ -593,29 +592,30 @@ class McpStdoutCleanTest(unittest.TestCase):
 
     ROOT = os.path.dirname(os.path.abspath(__file__))
 
-    @POSIX_ONLY
     def test_serve_until_keeps_stdio_clean(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         marker = os.path.join(tmp, "browser-ran")
         # Stands in for the browser launcher: prints to stdout, the way some
-        # launchers do, and tries to read stdin.
-        browser = os.path.join(tmp, "noisy-browser")
+        # launchers do, and tries to read stdin. A Python script so it runs on
+        # Windows too.
+        browser = os.path.join(tmp, "noisy_browser.py")
         with open(browser, "w") as f:
-            f.write("#!/bin/sh\n"
-                    'echo "BROWSER-STDOUT $1"\n'
-                    'if read -r line; then echo "BROWSER-READ-STDIN $line" >&2; fi\n'
-                    f'touch "{marker}"\n')
-        os.chmod(browser, 0o755)
+            f.write("import sys\n"
+                    "print('BROWSER-STDOUT ' + sys.argv[1], flush=True)\n"
+                    "line = sys.stdin.readline()\n"
+                    "if line:\n"
+                    "    print('BROWSER-READ-STDIN ' + line, file=sys.stderr, flush=True)\n"
+                    f"open({marker!r}, 'w').close()\n")
         # HTTPServer.server_bind() calls socket.getfqdn(), whose reverse DNS
         # lookup can take ~30s on GitHub's macOS runners; it is irrelevant here.
         code = ("import socket, sys, time; socket.getfqdn = lambda name='': name; "
                 "from sealref import ui; "
-                f"ui._BROWSER_HELPER = [{browser!r}]; "
+                f"ui._BROWSER_HELPER = [{sys.executable!r}, {browser!r}]; "
                 "ok = ui.serve_until('g', 'API_KEY', 'test', timeout=1.5); "
                 "time.sleep(0.5); "
                 "raise SystemExit(0 if ok is False else 3)")
-        env = {**os.environ, "PYTHONPATH": self.ROOT, "HOME": tmp}
+        env = {**os.environ, "PYTHONPATH": self.ROOT, "HOME": tmp, "USERPROFILE": tmp}
         # Files, not pipes, so a lingering grandchild cannot stall the test.
         with open(os.path.join(tmp, "in"), "w+") as fin, \
                 open(os.path.join(tmp, "out"), "w+") as fout, \
@@ -826,9 +826,7 @@ class KeyringBehaviourTest(unittest.TestCase):
                 b.set("g", "K", bad)
         self.assertEqual(win.calls, [])
         self.assertEqual(win.d[("vaultlet:g", "K")], "x" * 1280)  # old value untouched
-        self.b.set("g", "K", "x" * 5000)  # no cap on Secret Service
-        with mock.patch.object(sys, "platform", "win32"), self.assertRaises(ValueError):
-            self.b.set("g", "K", "x" * 1281)
+        self.b.set("g", "K", "x" * 5000)  # no cap on Secret Service, on any OS
 
 
 class MacSavePathTest(unittest.TestCase):

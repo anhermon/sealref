@@ -166,7 +166,7 @@ class Keyring:
                 "and run inside a desktop/D-Bus session; Windows: Credential Manager." % found)
 
     def _check_size(self, value):
-        if type(self.backend).__name__ == "WinVaultKeyring" or sys.platform == "win32":
+        if type(self.backend).__name__ == "WinVaultKeyring":  # the cap belongs to this backend, not the OS
             n = len(value.encode("utf-16-le"))
             if n > WIN_BLOB_MAX:
                 raise ValueError(
