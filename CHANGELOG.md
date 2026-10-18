@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Security fixes from the 2026-10-17 red-team review (see SECURITY-REVIEW.md):
+  - The local page's API needs a per-launch token, carried in the link sealref
+    opens. A bookmarked `http://127.0.0.1:8765/` without `#t=...` no longer
+    works; open the link `sealref ui` prints.
+  - New opt-in **Keychain approval** checkbox: every read of that secret raises
+    a macOS dialog. Existing secrets are unchanged until saved again with the box ticked.
+  - Values longer than about 2900 bytes, or containing any control character, are rejected.
+  - Keychain calls use `/usr/bin/security`; `bin/sealref` runs `python3 -I` and
+    handles relative symlinks; the page cannot be framed; the value field has
+    spell-check off; failed Keychain deletes keep the index entry.
+  - Redaction also catches hex and base64 inside longer encodings (HTTP Basic `user:key`).
+  - `run --ref ...=NAME` requires a valid env var name; Keychain read errors exit 2 with a message.
 - Refs now print as `sealref://` by default (previously `vaultlet://`).
   `vaultlet://` refs are still accepted everywhere, and
   `SEALREF_REF_SCHEME=vaultlet` / `--ref-scheme vaultlet` restores the old output.

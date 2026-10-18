@@ -15,28 +15,43 @@ This is a self-review, not an audit.
 | 6 | `~/.vaultlet` created with default umask (0755). | Created 0700. (The index inside was already 0600.) |
 | 7 | `sealref run` crashed on non-UTF-8 child output and left the child running on Ctrl-C. | `errors="replace"`; terminate on interrupt. |
 
+## Red-team review, 2026-10-17
+
+An adversarial pass. The threat model covered a prompt-injected agent with MCP and shell access, a malicious web page, other local processes and users, and accidental leakage. Codex gave a second opinion. PoCs used a recording `security` double or a throwaway keychain file, with dummy values only. Details: `SECURITY-REDTEAM-2026-10-17.md` (kept outside the repo).
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 8 | high | `security -i` runs each ~4 KB chunk of an over-long line as a separate command, so a long value did not stay one argument. | Command lines are capped at 3000 bytes. All control characters are rejected. Writes are `delete` + `add`, one command per line. |
+| 9 | high | Items were created trusting `/usr/bin/security`, so any same-user process read them with no prompt. | Opt-in **Keychain approval**: stored with `-T ""` (no trusted app), so every read raises a macOS dialog. Verified on a throwaway keychain: a default item read returns at once, a `-T ""` item read blocks on the dialog. |
+| 10 | high | The local API accepted any caller that sent `X-Vaultlet: 1`: local programs and *other macOS users* could list names, overwrite or delete secrets, or answer a `request_secret` page. | A random per-launch token, sent in the link's `#fragment` and compared in constant time on every API call. |
+| 11 | high | Bare `security` was resolved through `PATH`, so a planted binary would receive every value written. | `/usr/bin/security`. |
+| 12 | medium | `bin/sealref` (`python3 -m`) imported modules from the cwd: a planted `json.py` ran inside sealref. Relative symlinks were resolved against the cwd. | `python3 -I`; link targets resolved against the link's directory. |
+| 13 | medium | The page could be framed (clickjacking; key delete was one click). | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `nosniff`, `no-referrer`, `no-store`; key delete now asks for confirmation. |
+| 14 | medium | Redaction missed base64 of `user:key` (2 of 3 alignments) and hex. | Alignment-independent base64/URL-safe base64 cores; lower/upper hex. |
+| 15 | medium | The value field had spell-check on once "show" turned it into `type=text` (Chrome's enhanced spell check sends field text to Google). | `spellcheck="false"`, `autocomplete="off"`. |
+| 16 | medium | A failed Keychain delete still dropped the index entry, so the value stayed stored while hidden. | Only success or not-found (44) updates the index. |
+| 17 | low | Fixed `index.json.tmp` name (symlink-followable, shared by concurrent writers); a `~/.vaultlet` made 0755 by old versions stayed 0755. | `mkstemp`; the directory is re-chmodded to 0700 on each write. |
+| 18 | low | `run --ref ...=ENVNAME` accepted any string; a Keychain read error printed a traceback. | Alias validated as an env var name; clean error, with a 120 s timeout for the approval dialog. |
+
+Checked and not a problem: no MCP tool returns or reflects a value, prefix or length (no tool accepts a value). Errors carry names, not values. Host/Origin checks plus the preflight-forcing header stop cross-site requests and DNS rebinding. Port 0 has no bind race. `reason`, group and key are escaped (no XSS). There is no access log. A value split across pipe read chunks inside one line is still redacted, because lines are reassembled.
+
 ## Open, by design (see README threat model)
 
-- The agent selects the command run under `sealref run`, so it can print or
-  exfiltrate the value (`echo $K | rev`, `curl -d "$K"`). Redaction is a guard
-  against accident. Mitigation outside this tool: require approval for
-  `sealref run` in the agent's permission settings.
-- Same-user processes can read the Keychain item directly.
-- Redaction is line-buffered and covers raw, base64 and URL-quoted forms only.
-- `request_secret` returns as soon as `store.has` is true, so requesting a key
-  that already exists returns immediately without prompting. `has_secret` is
-  checked against the index, not the Keychain, so a manually deleted Keychain
-  item still reports as present.
-- A misleading `reason` in `request_secret` can socially engineer the user.
-- The UI port is predictable (`sealref ui` defaults to 8765); `request` uses a
-  random port. Any local process can connect to it; the guards above stop
-  browsers, not other local programs.
+- **A malicious agent can get any value it can name.** It chooses the command under `sealref run` (`curl -d "$K" ...`, `echo $K | rev`). Without Keychain approval it can also run `security find-generic-password -w` directly. With approval, each read needs a dialog click. But the dialog names `security`, not the command, so a sealref read and an agent read look identical, and "Always Allow" silently removes the protection. Keychain ACLs cannot single out sealref.
+- Considered and not shipped, because an agent with a shell bypasses each one by calling `security` itself or by choosing an allowed-but-hostile command: a per-ref allow-list of commands, refusing `sh -c`, and per-run approval in sealref's own page. Short-TTL injection adds nothing, because the env already lives only as long as the child.
+- While a child runs, other same-user processes can read its environment (`ps eww` showed a test value for a Homebrew `python3` child).
+- `--group` injects every key in the group, and the child inherits the caller's whole environment.
+- Redaction is per line. Split, reversed, hashed or otherwise transformed values pass. Values shorter than 4 characters are not redacted.
+- `request_secret` returns at once if the key is in the index. `has_secret` trusts the index, not the Keychain. The agent picks group, key and `reason`, so it can phish for unrelated credentials.
+- The page token is printed to stderr (MCP client logs) and is briefly in the browser-launcher's argv. `/api/quit` with the token stops the server, but `request_secret` still waits out its 300 s.
+- The `mcp==1.29.0` pin does not lock its dependencies or hashes.
 - `list_keys` / `has_secret` disclose which services you have credentials for.
 
 ## Logging
 
 The MCP server logs to stderr only; the web server's access log is disabled. No
-code path logs values. The only value-bearing path is stdin to `security -i`.
+code path logs values. The only value-bearing paths are stdin to `/usr/bin/security -i`
+and the env of the `sealref run` child.
 
 ## Rename to sealref
 
