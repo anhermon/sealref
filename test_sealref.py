@@ -16,6 +16,11 @@ from sealref import store, backends
 from sealref.cli import _build_needles, _redact_line
 
 
+# sh launchers, chmod modes, symlinks and `sh -c` children have no Windows equivalent.
+# These are skipped there (unverified on Windows either way; see README Limits).
+POSIX_ONLY = unittest.skipIf(sys.platform == "win32", "POSIX-only mechanics")
+
+
 class RefTest(unittest.TestCase):
     def test_round_trip(self):
         with mock.patch.dict(os.environ):
@@ -75,6 +80,7 @@ class CommandNameTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0)
             self.assertIn(f"usage: {prog} ", r.stdout)
 
+    @POSIX_ONLY
     def test_bin_script_ignores_cwd_modules_and_relative_symlink(self):
         tmp = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -93,6 +99,7 @@ class CommandNameTest(unittest.TestCase):
             self.assertIn("usage: sealref ", r.stdout)
             self.assertNotIn("PLANTED", r.stdout + r.stderr)
 
+    @POSIX_ONLY
     def test_bin_scripts(self):
         for name in ("sealref", "vaultlet"):
             r = subprocess.run([os.path.join(self.ROOT, "bin", name), "--help"], capture_output=True, text=True)
@@ -259,6 +266,7 @@ class NameValidationTest(unittest.TestCase):
             store.delete("g", "K")
             self.assertNotIn("K", store.list_keys("g"))
 
+    @POSIX_ONLY
     def test_index_temp_file_is_unique_and_not_followed(self):
         victim = os.path.join(self.tmpdir, "victim")
         open(victim, "w").close()
@@ -267,6 +275,7 @@ class NameValidationTest(unittest.TestCase):
         self.assertEqual(os.path.getsize(victim), 0)
         self.assertIn("g", store.list_groups())
 
+    @POSIX_ONLY
     def test_vault_dir_mode_repaired(self):
         os.chmod(self.tmpdir, 0o755)
         store.create_group("g")
@@ -298,6 +307,7 @@ class IndexAtomicWriteTest(unittest.TestCase):
             data = json.load(f)
         self.assertIn("g1", data["groups"])
 
+    @POSIX_ONLY
     def test_save_sets_mode_0600(self):
         store.create_group("g1")
         mode = os.stat(self.index_path).st_mode & 0o777
@@ -528,6 +538,7 @@ class RunAcceptsBothSchemesTest(unittest.TestCase):
     """`run --ref` resolves sealref:// and legacy vaultlet:// refs to the same
     Keychain item and injects the value."""
 
+    @POSIX_ONLY
     def test_both_schemes_resolve(self):
         import contextlib
         import gc
@@ -557,6 +568,7 @@ class McpStdoutCleanTest(unittest.TestCase):
 
     ROOT = os.path.dirname(os.path.abspath(__file__))
 
+    @POSIX_ONLY
     def test_serve_until_keeps_stdio_clean(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)

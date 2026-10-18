@@ -1,15 +1,68 @@
 name: test
 on: [push, pull_request]
 jobs:
-  test:
+  macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      # The runner's keychain is not guaranteed to be unlocked; the real
-      # keychain round-trip test is skipped here and run locally.
+          python-version: ${{ matrix.python-version }}
+      # Includes a real Keychain round trip against a throwaway keychain FILE
+      # created by the test (never on the search list).
       - run: python -m unittest -v test_sealref
-        env:
-          SEALREF_SKIP_KEYCHAIN: "1"
+
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring libsecret-1-0
+      - run: python -m pip install '.[keyring]'
+      - name: refuses without a Secret Service (no D-Bus session)
+        run: |
+          if echo dummy | sealref set ci K; then echo "stored without a keyring"; exit 1; fi
+      - name: unit suite + end-to-end on a real Secret Service
+        run: |
+          dbus-run-session -- sh -c '
+            set -e
+            echo dummy | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            python -m unittest -v test_sealref
+            python tests/linux/e2e.py
+          '
+
+  windows:
+    # Not run by the author (no Windows machine, nothing pushed): first CI run
+    # on a pushed branch is the first time this job executes.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install '.[keyring]'
+      - run: python -m unittest -v test_sealref
+      - name: Credential Manager round trip (dummy value)
+        run: |
+          echo dummy-ci-value-123 | sealref set ci CI_KEY
+          sealref run --ref sealref://ci/CI_KEY -- python -c "import os; print(os.environ['CI_KEY'])" | tee out.txt
+          grep -q "redacted:ci/CI_KEY" out.txt
+          ! grep -q dummy-ci-value-123 out.txt
+          python -c "from sealref import store; store.delete('ci','CI_KEY')"
