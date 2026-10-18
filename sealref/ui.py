@@ -265,7 +265,9 @@ PAGE = """<!doctype html>
     border: 1px solid var(--border); background: var(--bg); color: var(--text); }
   .new-group { display: flex; gap: 8px; margin-bottom: 24px; }
   .new-group input { flex: 1; }
-  .approve { flex-basis: 100%; color: var(--muted); font-size: 13px; }
+  .approve { flex-basis: 100%; display: flex; align-items: center; gap: 6px;
+    color: var(--muted); font-size: 13px; }
+  .add-key .approve input { flex: none; min-width: 0; margin: 0; }
   .pw-wrap { display: flex; gap: 4px; align-items: center; flex: 1; min-width: 140px; }
 </style>
 </head>
@@ -316,7 +318,13 @@ async function api(method, path, body) {
 }
 
 async function load() {
-  const groups = await api('GET', '/api/groups');
+  let groups;
+  try { groups = await api('GET', '/api/groups'); }
+  catch (e) {
+    document.getElementById('groups').innerHTML = '<div class="empty">This page needs the link ' +
+      'sealref printed when it started (it carries an access token). Open that link.</div>';
+    return;
+  }
   render(groups);
 }
 
