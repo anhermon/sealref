@@ -32,7 +32,7 @@ def has_secret():
 kr = keyring.get_keyring()
 check("SecretService" in type(kr).__module__ or "ChainerBackend" in type(kr).__name__, f"real backend: {type(kr).__module__}.{type(kr).__name__}")
 
-ui = subprocess.Popen(["sealref", "ui", "--port", "0"], stderr=subprocess.PIPE, text=True)
+ui = subprocess.Popen(["sealref", "ui", "--port", "0", "--no-browser"], stderr=subprocess.PIPE, text=True)
 url = ui.stderr.readline()
 m = re.search(r"http://127\.0\.0\.1:(\d+)/#t=(\S+)", url)
 check(m, "ui started and printed a tokenised URL")
@@ -50,6 +50,8 @@ def api(method, path, body=None):
         return e.code
 
 
+page = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
+check("const APPROVAL = false;" in page, "page hides the macOS-only approval checkbox")
 check(api("POST", "/api/groups", {"group": GROUP}) == 200, "create group via API")
 check(api("POST", "/api/keys", {"group": GROUP, "key": KEY, "value": VALUE}) == 200, "POST dummy secret via API with token")
 check(api("POST", "/api/keys", {"group": GROUP, "key": KEY, "value": VALUE, "require_approval": True}) == 400,

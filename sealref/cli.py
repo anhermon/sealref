@@ -19,7 +19,7 @@ USAGE = """usage: {prog} <command> [args...]
 commands:
   groups
   keys <group>
-  ui [--port N]
+  ui [--port N] [--no-browser]
   set <group> <key>      (hidden prompt; or pipe the value on stdin)
   request <group> <key> [--reason TEXT]
   run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
@@ -109,6 +109,8 @@ def cmd_set(rest):
 
 def cmd_ui(rest):
     port = DEFAULT_PORT
+    open_browser = "--no-browser" not in rest  # just print the link
+    rest = [a for a in rest if a != "--no-browser"]
     if "--port" in rest:
         try:
             port = int(rest[rest.index("--port") + 1])
@@ -119,7 +121,7 @@ def cmd_ui(rest):
     except ImportError:
         print(f"{PROG}: ui.py not implemented yet", file=sys.stderr)
         return 1
-    serve(port=port)
+    serve(port=port, open_browser=open_browser)
     return 0
 
 

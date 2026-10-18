@@ -13,7 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
 
-from . import store
+from . import backends, store
 
 MASK = "•" * 8
 MAX_BODY = 64 * 1024  # a secret is at most a few KB; refuse to buffer more
@@ -94,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, {"error": "forbidden"})
         path = urlparse(self.path).path
         if path == "/":
-            self._html(PAGE)
+            self._html(PAGE.replace("__APPROVAL__", "true" if backends.default_name() == "macos" else "false"))
         elif path == "/api/groups":
             self._json(200, [_group_view(g) for g in store.list_groups()])
         else:
@@ -177,11 +177,12 @@ def _make_server(port):
     return server
 
 
-def serve(port=8765):
+def serve(port=8765, open_browser=True):
     server = _make_server(port)
     url = f"http://127.0.0.1:{server.server_port}/#t={server.token}"
     print(f"sealref: serving on {url}", file=sys.stderr)
-    _open_browser(url)
+    if open_browser:
+        _open_browser(url)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
@@ -294,6 +295,7 @@ PAGE = """<!doctype html>
 </main>
 <div class="toast" id="toast"></div>
 <script>
+  const APPROVAL = __APPROVAL__;  // Keychain approval exists on macOS only
 const params = new URLSearchParams(location.search);
 const focusGroup = params.get('group');
 const focusKey = params.get('key');
@@ -408,8 +410,8 @@ function renderGroup(g) {
       <button type="button" class="show-btn">show</button>
     </span>
     <button class="primary add-btn">Save</button>
-    <label class="approve"><input type="checkbox" class="approve-input">
-      Ask me in a macOS Keychain dialog every time this secret is read (macOS only)</label>
+    ${APPROVAL ? `<label class="approve"><input type="checkbox" class="approve-input">
+      Ask me in a macOS Keychain dialog every time this secret is read</label>` : ''}
   `;
   const keyInput = addRow.querySelector('.key-input');
   const valInput = addRow.querySelector('.val-input');
@@ -422,7 +424,7 @@ function renderGroup(g) {
     const value = valInput.value;
     if (!key || !value) { toast('Key and value are required', true); return; }
     try {
-      const require_approval = addRow.querySelector('.approve-input').checked;
+      const require_approval = APPROVAL && addRow.querySelector('.approve-input').checked;
       await api('POST', '/api/keys', {group: g.name, key, value, require_approval});
       toast('Saved');
       load();

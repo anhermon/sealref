@@ -447,6 +447,31 @@ class UiGuardTest(unittest.TestCase):
     def test_delete_bad_name_is_400(self):
         self.assertEqual(self._req("DELETE", "/api/groups/a%20b"), 400)
 
+    def test_approval_checkbox_only_when_backend_is_macos(self):
+        import http.client
+        for backend, want in (("macos", "true"), ("keyring", "false")):
+            with mock.patch.dict(os.environ, {"SEALREF_BACKEND": backend}):
+                c = http.client.HTTPConnection("127.0.0.1", self.port)
+                c.request("GET", "/", headers={"Host": f"127.0.0.1:{self.port}"})
+                page = c.getresponse().read().decode()
+            self.assertIn(f"const APPROVAL = {want};", page)
+            self.assertNotIn("__APPROVAL__", page)
+
+    def test_ui_no_browser_flag_skips_the_launcher(self):
+        from sealref import cli, ui
+        with mock.patch.object(ui, "serve") as serve:
+            cli.main(["ui", "--port", "0", "--no-browser"])
+            cli.main(["ui", "--port", "0"])
+        self.assertEqual([c.kwargs["open_browser"] for c in serve.call_args_list], [False, True])
+        with mock.patch.object(ui, "_open_browser") as ob, \
+                mock.patch.object(ui, "_make_server") as mk:
+            mk.return_value.server_port = 1
+            mk.return_value.token = "t"
+            mk.return_value.serve_forever.side_effect = KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                ui.serve(0, open_browser=False)
+        ob.assert_not_called()
+
     def test_oversized_body_refused(self):
         big = json.dumps({"group": "g", "key": "K", "value": "x" * (ui_max() + 1)})
         self.assertEqual(self._req("POST", "/api/keys", body=big,

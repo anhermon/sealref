@@ -183,9 +183,11 @@ class Keyring:
         return v
 
     def set(self, group, key, value, require_approval=False):
-        # set_password replaces in place on every allow-listed backend (Secret
-        # Service replace=True, CredWrite, KWallet writePassword), so there is
-        # no delete-then-add window here. Per-item approval is a macOS Keychain
+        # set_password overwrites without a delete step on the allow-listed
+        # backends (Secret Service replace=True, CredWrite, KWallet), so a failed
+        # write keeps the old value. Windows caveat (keyring's WinVault): it
+        # first re-saves the old credential under a second target
+        # "<user>@<service>", so a replaced value lingers there until delete(). Per-item approval is a macOS Keychain
         # feature; the keyring backends cannot offer it.
         if require_approval:
             raise ValueError("Keychain approval is macOS-only; this backend cannot require it")
@@ -204,8 +206,12 @@ class Keyring:
             raise RuntimeError(f"keyring delete of {group}/{key} failed ({type(e).__name__})") from None
 
 
+def default_name():
+    return os.environ.get("SEALREF_BACKEND") or ("macos" if sys.platform == "darwin" else "keyring")
+
+
 def get_backend():
-    choice = os.environ.get("SEALREF_BACKEND") or ("macos" if sys.platform == "darwin" else "keyring")
+    choice = default_name()
     if choice == "macos":
         return MacKeychain()
     if choice == "keyring":
