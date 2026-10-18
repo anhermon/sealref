@@ -28,7 +28,7 @@ An adversarial pass. The threat model covered a prompt-injected agent with MCP a
 | 12 | medium | `bin/sealref` (`python3 -m`) imported modules from the cwd: a planted `json.py` ran inside sealref. Relative symlinks were resolved against the cwd. | `python3 -I`; link targets resolved against the link's directory. |
 | 13 | medium | The page could be framed (clickjacking; key delete was one click). | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `nosniff`, `no-referrer`, `no-store`; key delete now asks for confirmation. |
 | 14 | medium | Redaction missed base64 of `user:key` (2 of 3 alignments) and hex. | Alignment-independent base64/URL-safe base64 cores; lower/upper hex. |
-| 15 | medium | The value field had spell-check on once "show" turned it into `type=text` (Chrome's enhanced spell check sends field text to Google). | `spellcheck="false"`, `autocomplete="off"`. |
+| 15 | medium | The value field had spell-check on once "show" turned it into `type=text` (Chrome's enhanced spell check sends field text to Google). | Spell-check off (`spellcheck="false"`). `autocomplete="off"` is set too, but browsers may ignore it for password fields (see open items). |
 | 16 | medium | A failed Keychain delete still dropped the index entry, so the value stayed stored while hidden. | Only success or not-found (44) updates the index. |
 | 17 | low | Fixed `index.json.tmp` name (symlink-followable, shared by concurrent writers); a `~/.vaultlet` made 0755 by old versions stayed 0755. | `mkstemp`; the directory is re-chmodded to 0700 on each write. |
 | 18 | low | `run --ref ...=ENVNAME` accepted any string; a Keychain read error printed a traceback. | Alias validated as an env var name; clean error, with a 120 s timeout for the approval dialog. |
@@ -45,6 +45,10 @@ Checked and not a problem: no MCP tool returns or reflects a value, prefix or le
 - `request_secret` returns at once if the key is in the index. `has_secret` trusts the index, not the Keychain. The agent picks group, key and `reason`, so it can phish for unrelated credentials.
 - The page token is printed to stderr (MCP client logs) and is briefly in the browser-launcher's argv. `/api/quit` with the token stops the server, but `request_secret` still waits out its 300 s.
 - The `mcp==1.29.0` pin does not lock its dependencies or hashes.
+- A browser may still offer to save the value in its password manager (and sync it). Decline. Browser extensions can read the field.
+- A write is `delete` + `add`. If the add fails after the delete succeeded, the old value is gone while the index still lists the key. This is rare, and the error is reported.
+- Deleting a protected (Keychain approval) item raises no dialog, so any same-user process can delete one silently.
+- "Always Allow" adding `/usr/bin/security` to the item's trusted apps is Apple's documented dialog behaviour. It was not clicked in this review.
 - `list_keys` / `has_secret` disclose which services you have credentials for.
 
 ## Logging

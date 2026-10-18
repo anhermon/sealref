@@ -296,6 +296,7 @@ wants the value.
   ask for credentials the task does not need.
 - `has_secret` and `request_secret` trust the name index, not the Keychain.
   A key that was deleted by hand still counts as present.
+- If your browser offers to save the value in its password manager, decline.
 - The access token for the local page is printed to stderr (which an MCP
   client may log) and is briefly visible in the browser-launcher's argv.
 - The MCP server's `mcp==1.29.0` pin covers only that package. Its
