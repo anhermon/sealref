@@ -89,12 +89,19 @@ def _which_path_only(cmd, path, pathext):
     (`.\\tool`, `C:\\x\\tool`) is the user's explicit choice and is kept."""
     if os.path.dirname(cmd):
         return cmd
-    exts = [""] if os.path.splitext(cmd)[1] else [""] + [e for e in pathext if e]
+    # As CPython's shutil.which on Windows: the bare name only if it already
+    # ends in a PATHEXT extension; otherwise name+ext. (Node ships an
+    # extensionless `npm` sh script next to npm.cmd; CreateProcess cannot run it.)
+    pathext = [e for e in pathext if e]
+    if any(cmd.lower().endswith(e.lower()) for e in pathext):
+        files = [cmd]
+    else:
+        files = [cmd + e for e in pathext]
     for d in path.split(os.pathsep):
         if not d or not os.path.isabs(d):
             continue
-        for e in exts:
-            cand = os.path.join(d, cmd + e)
+        for f in files:
+            cand = os.path.join(d, f)
             if os.path.isfile(cand):
                 return cand
     return None
@@ -242,9 +249,12 @@ def cmd_run(rest):
     # transformed in a way not listed in _build_needles) is not caught.
     if sys.platform == "win32":
         # CreateProcess does not search PATHEXT, so `npm` (npm.cmd) would not start.
-        child_cmd = [_which_path_only(child_cmd[0], env.get("PATH", ""),
-                                      env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";"))
-                     or child_cmd[0], *child_cmd[1:]]
+        found = _which_path_only(child_cmd[0], env.get("PATH", ""),
+                                 env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";"))
+        if found is None:  # not the bare name: CreateProcess would also search the cwd
+            print(f"{PROG}: cannot run {child_cmd[0]!r}: command not found on PATH", file=sys.stderr)
+            return 127
+        child_cmd = [found, *child_cmd[1:]]
     try:
         proc = subprocess.Popen(
             child_cmd,

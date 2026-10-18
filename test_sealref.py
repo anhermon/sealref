@@ -1177,6 +1177,32 @@ class R2RegressionTest(unittest.TestCase):
         self.assertEqual(cli._which_path_only(os.path.join(".", "tool"), path, [".CMD"]),
                          os.path.join(".", "tool"))  # explicit path is the user's choice
 
+    def test_r31_npm_shaped_lookup_prefers_pathext_over_bare_script(self):
+        from sealref import cli
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for n in ("npm", "npm.cmd", "tool.py"):  # Node ships a bare `npm` sh script beside npm.cmd
+            open(os.path.join(tmp, n), "w").close()
+        ext = [".com", ".exe", ".bat", ".cmd"]
+        self.assertEqual(cli._which_path_only("npm", tmp, ext), os.path.join(tmp, "npm.cmd"))
+        self.assertEqual(cli._which_path_only("npm.cmd", tmp, ext), os.path.join(tmp, "npm.cmd"))
+        self.assertIsNone(cli._which_path_only("tool.py", tmp, ext))  # bare name not in PATHEXT: not runnable
+
+    def test_r32_not_found_on_path_exits_127_without_bare_name_fallback(self):
+        import contextlib
+        import io
+        from sealref import cli
+        err = io.StringIO()
+        with mock.patch.object(sys, "platform", "win32"), \
+                mock.patch.object(cli.subprocess, "Popen") as popen, \
+                mock.patch.object(store, "_resolve", return_value="dummy-value"), \
+                mock.patch.dict(os.environ, {"PATH": ""}), \
+                contextlib.redirect_stderr(err):
+            rc = cli.cmd_run(["--ref", "sealref://g/K", "--", "plantedtool"])
+        self.assertEqual(rc, 127)
+        popen.assert_not_called()
+        self.assertIn("command not found on PATH", err.getvalue())
+
     def test_r26_parse_g_output(self):
         p = backends._parse_g_password
         self.assertEqual(p('keychain: "x"\npassword: "plain value"\n', "g", "K"), "plain value")

@@ -1,7 +1,10 @@
 """Windows Credential Manager end to end through the real keyring backend.
 Dummy values only; everything is removed at the end. Run on Windows (CI)."""
+import os
+import re
 import subprocess
 import sys
+import tempfile
 
 import keyring
 
@@ -44,6 +47,22 @@ try:
     check(r.stdout.strip() == str(len(V1)), "child received the real value")
     r = sealref("run", "--ref", REF, "--", "cmd", "/c", "echo", "hello")  # PATHEXT / .exe lookup path
     check(r.returncode == 0 and "hello" in r.stdout, "run finds a builtin via cmd /c")
+    # Real npm (Node preinstalled on the runner): ships an extensionless `npm` script beside npm.cmd.
+    r = sealref("run", "--ref", REF, "--", "npm", "--version")
+    check(r.returncode == 0 and re.fullmatch(r"\d+\.\d+\.\d+\s*", r.stdout) and V1 not in r.stdout + r.stderr,
+          f"real `run -- npm --version` exit 0, output {r.stdout.strip()!r}, no secret")
+    # A planted foo.cmd / git.cmd in the cwd must NOT run (cmd.exe-style cwd lookup).
+    plant = tempfile.mkdtemp()
+    marker = os.path.join(plant, "PLANTED-RAN")
+    for n in ("foo.cmd", "git.cmd"):
+        with open(os.path.join(plant, n), "w") as f:
+            f.write(f"@echo off\r\necho x> \"{marker}\"\r\n")
+    r = subprocess.run(["sealref", "run", "--ref", REF, "--", "foo"], capture_output=True, text=True, cwd=plant)
+    check(r.returncode == 127 and "command not found on PATH" in r.stderr and not os.path.exists(marker),
+          f"planted foo.cmd in cwd not run (exit {r.returncode}, marker absent)")
+    r = subprocess.run(["sealref", "run", "--ref", REF, "--", "git", "--version"], capture_output=True, text=True, cwd=plant)
+    check(r.returncode == 0 and "git version" in r.stdout and not os.path.exists(marker),
+          "git resolves to the real git, planted git.cmd not run")
     r = sealref("run", "--ref", REF, "--", "no-such-command-xyz")
     check(r.returncode in (126, 127) and "Traceback" not in r.stderr, f"missing command exits {r.returncode} cleanly")
 
