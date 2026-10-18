@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -436,6 +437,39 @@ class UiGuardTest(unittest.TestCase):
     def test_delete_bad_name_is_400(self):
         self.assertEqual(self._req("DELETE", "/api/groups/a%20b"), 400)
 
+    def test_oversized_body_refused(self):
+        big = json.dumps({"group": "g", "key": "K", "value": "x" * (ui_max() + 1)})
+        self.assertEqual(self._req("POST", "/api/keys", body=big,
+                                   headers={"Content-Length": str(len(big))}), 400)
+        self.assertEqual(self._req("POST", "/api/groups", body=json.dumps({"group": "ok"})), 200)
+
+    def test_quit_ends_pending_request_at_once(self):
+        import threading
+        import time
+        from sealref import ui
+        res = {}
+        t = threading.Thread(target=lambda: res.update(
+            ok=ui.serve_until("g", "API_KEY", "r", timeout=60)), daemon=True)
+        with mock.patch.object(ui, "_open_browser", lambda url: res.update(url=url)):
+            t.start()
+            for _ in range(100):
+                if "url" in res:
+                    break
+                time.sleep(0.05)
+        import http.client
+        import re
+        port = int(re.search(r"127\.0\.0\.1:(\d+)/", res["url"]).group(1))
+        token = res["url"].split("#t=")[1]
+        c = http.client.HTTPConnection("127.0.0.1", port)
+        c.request("POST", "/api/quit", body=b"{}",
+                  headers={"Host": f"127.0.0.1:{port}", "X-Vaultlet": token})
+        self.assertEqual(c.getresponse().status, 200)
+        t0 = time.time()
+        t.join(timeout=10)
+        self.assertFalse(t.is_alive())
+        self.assertLess(time.time() - t0, 5)
+        self.assertIs(res["ok"], False)
+
 
 class RedactionGapsTest(unittest.TestCase):
     def test_basic_auth_base64_any_alignment_and_hex(self):
@@ -580,36 +614,391 @@ class McpStdoutCleanTest(unittest.TestCase):
         self.assertIn("webbrowser.open(sys.argv[1])", ui._BROWSER_HELPER[-1])
 
 
-class GetSecretIntegrationTest(unittest.TestCase):
-    """Real keychain round trip, cleaned up in tearDown. Skipped if `security`
-    is unavailable (non-macOS)."""
+class FakeKeyringBackend:
+    """In-memory keyring backend. `module`/`name` are what the allow-list sees."""
+    priority = 1
 
-    GROUP = "sealref-test-integration"
-    KEY = "TEST_KEY"
+    def __init__(self, module, name, store=None):
+        self.__class__ = type(name, (FakeKeyringBackend,), {"__module__": module})
+        self.d = store if store is not None else {}
+        self.calls = []
+
+    def get_password(self, svc, user):
+        self.calls.append("get")
+        return self.d.get((svc, user))
+
+    def set_password(self, svc, user, pw):
+        self.calls.append("set")
+        self.d[(svc, user)] = pw
+
+    def delete_password(self, svc, user):
+        self.calls.append("delete")
+        if (svc, user) not in self.d:
+            raise FakeErrors.PasswordDeleteError("not found")
+        del self.d[(svc, user)]
+
+
+class FakeErrors:
+    class PasswordDeleteError(Exception):
+        pass
+
+
+class FakeChainer:
+    def __init__(self, backends):
+        self.__class__ = type("ChainerBackend", (FakeChainer,), {"__module__": "keyring.backends.chainer"})
+        self.backends = backends
+
+
+def fake_kr(current):
+    return mock.Mock(get_keyring=lambda: current, errors=FakeErrors)
+
+
+SECURE = [("keyring.backends.SecretService", "Keyring"), ("keyring.backends.libsecret", "Keyring"),
+          ("keyring.backends.kwallet", "DBusKeyring"), ("keyring.backends.Windows", "WinVaultKeyring"),
+          ("keyring.backends.macOS", "Keyring")]
+INSECURE = [("keyring.backends.fail", "Keyring"), ("keyring.backends.null", "Keyring"),
+            ("keyrings.alt.file", "PlaintextKeyring"), ("keyrings.alt.file", "EncryptedKeyring"),
+            ("keyrings.alt.Gnome", "Keyring"), ("keyring.backends.Windows", "RegistryKeyring"),
+            ("some.other.pkg", "Keyring")]
+
+
+class KeyringAllowListTest(unittest.TestCase):
+    def test_secure_backends_accepted(self):
+        for mod, name in SECURE:
+            b = backends.Keyring(fake_kr(FakeKeyringBackend(mod, name)))
+            self.assertEqual(type(b.backend).__module__, mod)
+
+    def test_insecure_backends_refused_with_clear_error(self):
+        for mod, name in INSECURE:
+            with self.assertRaisesRegex(RuntimeError, r"no secure OS keyring available.*gnome-keyring") as c:
+                backends.Keyring(fake_kr(FakeKeyringBackend(mod, name)))
+            self.assertIn(f"{mod}.{name}", str(c.exception))
+
+    def test_chainer_uses_only_allowed_member_never_plaintext(self):
+        plain = FakeKeyringBackend("keyrings.alt.file", "PlaintextKeyring")
+        ss = FakeKeyringBackend("keyring.backends.SecretService", "Keyring")
+        # plaintext listed first (higher priority): still never used
+        b = backends.Keyring(fake_kr(FakeChainer([plain, ss])))
+        b.set("g", "K", "dummy-value")
+        self.assertEqual(b.get("g", "K"), "dummy-value")
+        b.delete("g", "K")
+        self.assertEqual(plain.calls, [])
+        self.assertEqual(ss.calls, ["set", "get", "delete"])
+
+    def test_chainer_with_only_insecure_members_refused(self):
+        plain = FakeKeyringBackend("keyrings.alt.file", "PlaintextKeyring")
+        enc = FakeKeyringBackend("keyrings.alt.file", "EncryptedKeyring")
+        with self.assertRaisesRegex(RuntimeError, "no secure OS keyring"):
+            backends.Keyring(fake_kr(FakeChainer([plain, enc])))
+        with self.assertRaisesRegex(RuntimeError, "no secure OS keyring"):
+            backends.Keyring(fake_kr(FakeChainer([])))
+        self.assertEqual(plain.calls + enc.calls, [])
+
+    def test_get_backend_refuses_via_store_with_no_fallback(self):
+        kr = fake_kr(FakeKeyringBackend("keyrings.alt.file", "PlaintextKeyring"))
+        with mock.patch.dict(os.environ, {"SEALREF_BACKEND": "keyring"}), \
+                mock.patch.dict(sys.modules, {"keyring": kr, "keyring.errors": FakeErrors}):
+            with self.assertRaisesRegex(RuntimeError, "no secure OS keyring"):
+                store.set_secret("g", "K", "dummy")
+        self.assertEqual(kr.get_keyring().d, {})
+
+    def test_missing_lib_message(self):
+        with mock.patch.dict(sys.modules, {"keyring": None}):
+            with self.assertRaisesRegex(RuntimeError, r"sealref\[keyring\]"):
+                backends.Keyring()
+
+    def test_selection(self):
+        with mock.patch.dict(os.environ, {"SEALREF_BACKEND": "macos"}):
+            self.assertIsInstance(backends.get_backend(), backends.MacKeychain)
+        with mock.patch.dict(os.environ, {"SEALREF_BACKEND": "nope"}):
+            with self.assertRaises(ValueError):
+                backends.get_backend()
+        env = {k: v for k, v in os.environ.items() if k != "SEALREF_BACKEND"}
+        for plat, want in (("darwin", "macos"), ("linux", "keyring"), ("win32", "keyring")):
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", plat), \
+                    mock.patch.object(backends, "Keyring", lambda: type("K", (), {"name": "keyring"})()):
+                self.assertEqual(backends.get_backend().name, want)
+
+
+class KeyringBehaviourTest(unittest.TestCase):
+    def setUp(self):
+        self.inner = FakeKeyringBackend("keyring.backends.SecretService", "Keyring")
+        self.b = backends.Keyring(fake_kr(self.inner))
+
+    def test_roundtrip_and_service_name(self):
+        self.b.set("g", "K", 'v"al\\ue')
+        self.assertIn(("vaultlet:g", "K"), self.inner.d)  # same naming as the Keychain backend
+        self.assertEqual(self.b.get("g", "K"), 'v"al\\ue')
+
+    def test_delete_absent_is_ok_but_other_errors_propagate_value_free(self):
+        self.b.delete("g", "K")  # PasswordDeleteError: absent
+        self.inner.delete_password = mock.Mock(side_effect=OSError("locked, sk-leak-123"))
+        with self.assertRaises(RuntimeError) as c:
+            self.b.delete("g", "K")
+        self.assertNotIn("sk-leak-123", str(c.exception))
+        self.assertIn("OSError", str(c.exception))
+
+    def test_store_delete_keeps_index_when_keyring_delete_fails(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.multiple(store, VAULT_DIR=tmp, INDEX_PATH=os.path.join(tmp, "index.json")), \
+                mock.patch.object(store, "get_backend", lambda: self.b):
+            store.set_secret("g", "K", "dummy-value")
+            self.inner.delete_password = mock.Mock(side_effect=OSError("locked"))
+            with self.assertRaises(RuntimeError):
+                store.delete("g", "K")
+            self.assertIn("K", store.list_keys("g"))
+            del self.inner.delete_password
+            store.delete("g", "K")
+            self.assertNotIn("K", store.list_keys("g"))
+            self.assertEqual(self.inner.d, {})
+
+    def test_read_errors_are_clean_and_missing_is_error(self):
+        with self.assertRaisesRegex(RuntimeError, "not found"):
+            self.b.get("g", "K")
+        self.inner.get_password = mock.Mock(side_effect=OSError("boom sk-leak-123"))
+        with self.assertRaises(RuntimeError) as c:
+            self.b.get("g", "K")
+        self.assertNotIn("sk-leak-123", str(c.exception))
+
+    def test_write_error_does_not_leak_value(self):
+        self.inner.set_password = mock.Mock(side_effect=RuntimeError("boom sk-leak-123"))
+        with self.assertRaises(RuntimeError) as c:
+            self.b.set("g", "K", "sk-leak-123")
+        self.assertNotIn("sk-leak-123", str(c.exception))
+
+    def test_overwrite_is_in_place_so_failed_write_keeps_old_value(self):
+        self.b.set("g", "K", "old-value")
+        self.inner.set_password = mock.Mock(side_effect=OSError("denied"))
+        with self.assertRaises(RuntimeError):
+            self.b.set("g", "K", "new-value")
+        self.assertEqual(self.b.get("g", "K"), "old-value")  # never deleted first
+        self.assertNotIn("delete", self.inner.calls)
+
+    def test_approval_is_macos_only(self):
+        with self.assertRaisesRegex(ValueError, "macOS-only"):
+            self.b.set("g", "K", "dummy", require_approval=True)
+
+    def test_windows_blob_cap_fails_before_writing(self):
+        win = FakeKeyringBackend("keyring.backends.Windows", "WinVaultKeyring")
+        b = backends.Keyring(fake_kr(win))
+        b.set("g", "K", "x" * 1280)  # exactly 2560 bytes as UTF-16
+        win.calls.clear()
+        for bad in ("x" * 1281, "é" * 1281, "\U0001F600" * 641):  # 641 astral = 2564 bytes
+            with self.assertRaisesRegex(ValueError, "Windows Credential Manager"):
+                b.set("g", "K", bad)
+        self.assertEqual(win.calls, [])
+        self.assertEqual(win.d[("vaultlet:g", "K")], "x" * 1280)  # old value untouched
+        self.b.set("g", "K", "x" * 5000)  # no cap on Secret Service
+        with mock.patch.object(sys, "platform", "win32"), self.assertRaises(ValueError):
+            self.b.set("g", "K", "x" * 1281)
+
+
+class MacSavePathTest(unittest.TestCase):
+    """The replace path (delete then add) must not silently lose data."""
 
     def setUp(self):
-        if shutil.which("security") is None or (os.environ.get("VAULTLET_SKIP_KEYCHAIN") or os.environ.get("SEALREF_SKIP_KEYCHAIN")):
-            self.skipTest("no usable keychain (not macOS, or VAULTLET_SKIP_KEYCHAIN set)")
         self.tmpdir = tempfile.mkdtemp()
         self._patch = mock.patch.multiple(
-            store, VAULT_DIR=self.tmpdir, INDEX_PATH=os.path.join(self.tmpdir, "index.json")
-        )
+            store, VAULT_DIR=self.tmpdir, INDEX_PATH=os.path.join(self.tmpdir, "index.json"))
         self._patch.start()
 
     def tearDown(self):
-        try:
-            store.delete(self.GROUP, self.KEY)
-        except Exception:
-            pass
         self._patch.stop()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_set_resolve_delete_round_trip(self):
-        store.set_secret(self.GROUP, self.KEY, 'integration "test" \\value')
-        self.assertTrue(store.has(self.GROUP, self.KEY))
-        self.assertEqual(store._resolve(self.GROUP, self.KEY), 'integration "test" \\value')
-        store.delete(self.GROUP, self.KEY)
-        self.assertFalse(store.has(self.GROUP, self.KEY))
+    @staticmethod
+    def _fake(exists_seq, write_rc=0, write_err=""):
+        """subprocess.run double: find-generic-password answers from exists_seq."""
+        seq = list(exists_seq)
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            if argv[1] == "find-generic-password":
+                return mock.Mock(returncode=0 if seq.pop(0) else 44, stdout="", stderr="")
+            return mock.Mock(returncode=write_rc, stdout="", stderr=write_err)
+        return run, calls
+
+    def test_first_save_has_no_delete_line(self):
+        run, calls = self._fake([False])
+        with mock.patch("sealref.store.subprocess.run", run):
+            store.set_secret("g", "K", "value")
+        script = calls[-1][1]["input"]
+        self.assertEqual([l.split()[0] for l in script.splitlines()], ["add-generic-password"])
+
+    def test_failed_first_save_loses_nothing_and_is_not_indexed(self):
+        run, calls = self._fake([False], write_rc=1, write_err="add-generic-password: returned -128")
+        with mock.patch("sealref.store.subprocess.run", run):
+            with self.assertRaises(RuntimeError) as c:
+                store.set_secret("g", "K", "value")
+        self.assertNotIn("previous", str(c.exception))
+        self.assertNotIn("delete-generic-password", calls[-1][1]["input"])
+        self.assertEqual(store.list_keys("g"), [])
+
+    def test_failed_replace_after_delete_says_so_and_drops_index_entry(self):
+        run, _ = self._fake([False], write_rc=0)
+        with mock.patch("sealref.store.subprocess.run", run):
+            store.set_secret("g", "K", "old")
+        self.assertIn("K", store.list_keys("g"))
+        # exists before; add fails; item gone afterwards
+        run, _ = self._fake([True, False], write_err="add-generic-password: returned -128")
+        with mock.patch("sealref.store.subprocess.run", run):
+            with self.assertRaisesRegex(RuntimeError, "previous value of g/K was deleted"):
+                store.set_secret("g", "K", "new")
+        self.assertNotIn("K", store.list_keys("g"))  # has_secret stays truthful
+
+    def test_failed_replace_that_kept_the_item_keeps_index_entry(self):
+        run, _ = self._fake([False])
+        with mock.patch("sealref.store.subprocess.run", run):
+            store.set_secret("g", "K", "old")
+        run, _ = self._fake([True, True], write_rc=1)
+        with mock.patch("sealref.store.subprocess.run", run):
+            with self.assertRaisesRegex(RuntimeError, "previous value of g/K was kept"):
+                store.set_secret("g", "K", "new")
+        self.assertIn("K", store.list_keys("g"))
+
+    def test_keychain_file_option_is_appended_to_every_command(self):
+        run, calls = self._fake([True, True])
+        with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": "/tmp/x y.keychain-db"}), \
+                mock.patch("sealref.store.subprocess.run", run):
+            store.set_secret("g", "K", "value")
+            store._resolve("g", "K")
+            store.delete("g", "K")
+        script = [c for c in calls if c[0][1] == "-i"][0][1]["input"]
+        self.assertTrue(all(l.endswith(' "/tmp/x y.keychain-db"') for l in script.splitlines()), script)
+        others = [c[0] for c in calls if c[0][1] != "-i"]
+        self.assertTrue(others and all(a[-1] == "/tmp/x y.keychain-db" for a in others), others)
+        with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": "a\nb"}):
+            with self.assertRaises(ValueError):
+                backends.MacKeychain()
+
+
+class EntryPointTest(unittest.TestCase):
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+
+    def test_console_scripts_declared_and_importable(self):
+        import importlib
+        import re
+        with open(os.path.join(self.ROOT, "pyproject.toml")) as f:
+            text = f.read()
+        scripts = dict(re.findall(r'^(\w+)\s*=\s*"([\w.]+:\w+)"', text.split("[project.scripts]")[1], re.M))
+        self.assertEqual(set(scripts), {"sealref", "vaultlet"})
+        self.assertIn("keyring", text.split("[project.optional-dependencies]")[1])
+        for target in scripts.values():
+            mod, attr = target.split(":")
+            self.assertTrue(callable(getattr(importlib.import_module(mod), attr)))
+
+    def test_vaultlet_entry_point_reports_legacy_prog(self):
+        env = {k: v for k, v in os.environ.items() if k != "SEALREF_PROG"}
+        env["PYTHONPATH"] = self.ROOT
+        for target, prog in (("sealref.cli", "sealref"), ("vaultlet.__main__", "vaultlet")):
+            r = subprocess.run([sys.executable, "-c",
+                                f"import sys; from {target} import main; sys.exit(main(['--help']))"],
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"usage: {prog} ", r.stdout)
+
+
+class RunExitCodeTest(unittest.TestCase):
+    def _run(self, *argv):
+        import contextlib
+        import io
+        from sealref import cli
+        err = io.StringIO()
+        with mock.patch.object(store, "_resolve", return_value="dummy-value"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            return cli.cmd_run(["--ref", "sealref://g/K", "--", *argv]), err.getvalue()
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_signal_death_is_128_plus_n_and_missing_command_is_127(self):
+        self.assertEqual(self._run("sh", "-c", "kill -TERM $$")[0], 128 + 15)
+        rc, err = self._run("/nonexistent/sealref-no-such-cmd")
+        self.assertEqual(rc, 127)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("dummy-value", err)
+
+
+def ui_max():
+    from sealref import ui
+    return ui.MAX_BODY
+
+
+def _mac_acl_apps(dump, acct):
+    """Number of apps trusted to decrypt the item (None if not found)."""
+    for block in dump.split("\nkeychain:"):
+        if f'"acct"<blob>="{acct}"' in block:
+            m = re.search(r"authorizations \(\d+\): decrypt[^\n]*\n(?:[^\n]*\n)*?\s*applications \((\d+)\)", block)
+            return int(m.group(1)) if m else None
+
+
+@unittest.skipUnless(sys.platform == "darwin" and os.path.exists("/usr/bin/security"), "macOS only")
+class MacThrowawayKeychainTest(unittest.TestCase):
+    """Real round trip through /usr/bin/security against a throwaway keychain
+    FILE created here. It is never added to the search list, so the login
+    keychain is untouched; dummy values only."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.kc = os.path.join(self.tmpdir, "throwaway.keychain-db")
+        before = subprocess.run(["/usr/bin/security", "list-keychains"], capture_output=True, text=True).stdout
+        self.addCleanup(self._cleanup, before)
+        subprocess.run(["/usr/bin/security", "create-keychain", "-p", "dummy", self.kc],
+                       check=True, capture_output=True)
+        env = mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": self.kc, "SEALREF_BACKEND": "macos"})
+        env.start()
+        self.addCleanup(env.stop)
+        p = mock.patch.multiple(store, VAULT_DIR=self.tmpdir, INDEX_PATH=os.path.join(self.tmpdir, "index.json"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _cleanup(self, before):
+        subprocess.run(["/usr/bin/security", "delete-keychain", self.kc], capture_output=True)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        after = subprocess.run(["/usr/bin/security", "list-keychains"], capture_output=True, text=True).stdout
+        assert after == before, "search list changed"
+
+    def test_round_trip_ref_run_redaction_delete(self):
+        import contextlib
+        import io
+        from sealref import cli
+        value = 'dummy "quoted" \\value-12345'
+        r = store.set_secret("rt", "DUMMY_KEY", value)
+        self.assertEqual(r, "sealref://rt/DUMMY_KEY")
+        self.assertTrue(store.has("rt", "DUMMY_KEY"))
+        self.assertEqual(store._resolve("rt", "DUMMY_KEY"), value)
+        # overwrite in place
+        store.set_secret("rt", "DUMMY_KEY", "second-dummy-value")
+        self.assertEqual(store._resolve("rt", "DUMMY_KEY"), "second-dummy-value")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_run(["--ref", r, "--", "sh", "-c", 'echo "got=$DUMMY_KEY"'])
+        self.assertEqual((rc, buf.getvalue()), (0, "got=«redacted:rt/DUMMY_KEY»\n"))
+        # the item is in the throwaway file and only there
+        dump = subprocess.run(["/usr/bin/security", "dump-keychain", self.kc],
+                              capture_output=True, text=True).stdout
+        self.assertIn('"svce"<blob>="vaultlet:rt"', dump)
+        store.delete("rt", "DUMMY_KEY")
+        self.assertFalse(store.has("rt", "DUMMY_KEY"))
+        with self.assertRaises(RuntimeError):
+            store._resolve("rt", "DUMMY_KEY")
+        store.delete("rt", "DUMMY_KEY")  # already gone: fine
+
+    def test_approval_acl_present_only_when_opted_in(self):
+        store.set_secret("acl", "OPEN_KEY", "dummy-open-value")
+        store.set_secret("acl", "GATED_KEY", "dummy-gated-value", require_approval=True)
+        dump = subprocess.run(["/usr/bin/security", "dump-keychain", "-a", self.kc],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(_mac_acl_apps(dump, "OPEN_KEY"), 1)   # /usr/bin/security trusted: silent reads
+        self.assertEqual(_mac_acl_apps(dump, "GATED_KEY"), 0)  # nobody trusted: every read asks
+        # deleting the gated item needs no dialog and works through sealref
+        store.delete("acl", "GATED_KEY")
+        self.assertFalse(store.has("acl", "GATED_KEY"))
+
+    def test_replace_over_gated_item_keeps_working(self):
+        store.set_secret("acl", "K", "dummy-one", require_approval=True)
+        store.set_secret("acl", "K", "dummy-two")  # replace and drop the gate
+        self.assertEqual(store._resolve("acl", "K"), "dummy-two")
 
 
 if __name__ == "__main__":
