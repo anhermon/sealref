@@ -17,6 +17,8 @@ jobs:
       # Includes a real Keychain round trip against a throwaway keychain FILE
       # created by the test (never on the search list).
       - run: python -m unittest -v test_sealref
+      - name: installed package (fresh venv) + MCP e2e
+        run: bash tests/installed_e2e.sh .
 
   linux:
     runs-on: ubuntu-latest
@@ -41,6 +43,7 @@ jobs:
             echo dummy | gnome-keyring-daemon --unlock --components=secrets >/dev/null
             python -m unittest -v test_sealref
             python tests/linux/e2e.py
+            bash tests/installed_e2e.sh ".[keyring]"
           '
 
   windows:
@@ -61,3 +64,5 @@ jobs:
       - run: python -m unittest -v test_sealref
       - name: Credential Manager end to end (dummy values)
         run: python tests/windows/e2e.py
+      - name: installed package (fresh venv) + MCP e2e
+        run: bash tests/installed_e2e.sh '.[keyring]'

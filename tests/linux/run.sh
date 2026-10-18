@@ -25,6 +25,8 @@ dbus-run-session -- sh -c '
   python tests/linux/e2e.py
   echo "-- bin/ launcher (POSIX shim, python3 -I) still works"
   bin/sealref groups >/dev/null && bin/vaultlet --help | head -1
+  echo "-- installed package in a fresh venv + MCP e2e (real Secret Service)"
+  bash tests/installed_e2e.sh ".[keyring]"
   echo "-- keyrings.alt installed next to gnome-keyring: Secret Service is used, plaintext file never"
   PATH=/opt/venv-alt/bin:$PATH sh -c "echo dummy-alt-value | sealref set altcheck ALT_KEY && sealref run --ref sealref://altcheck/ALT_KEY -- python -c \"import os; print(os.environ[\\\"ALT_KEY\\\"])\""
   [ ! -e "$HOME/.local/share/python_keyring" ] || { echo "FAIL: plaintext keyring file created" >&2; exit 1; }

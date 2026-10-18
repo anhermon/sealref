@@ -40,7 +40,7 @@ the MCP server runs through `uv`.
 
    ```sh
    claude mcp add sealref --scope user -- \
-     uv run --directory ~/src/sealref --with "mcp==1.29.0" \
+     uv run --directory /absolute/path/to/sealref --with "mcp==1.29.0" \
      python -m sealref.mcp_server
    ```
 
@@ -171,9 +171,11 @@ git clone https://github.com/anhermon/sealref ~/src/sealref
 ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # POSIX; or add bin/ to PATH
 brew install uv                                              # for the MCP server
 
-# or, on any OS, as real commands (this is the way on Windows):
-pip install ~/src/sealref                    # macOS: no extra dependencies
-pip install '~/src/sealref[keyring]'         # Linux and Windows
+# or, on any OS, as real commands (this is the way on Windows). CI runs exactly
+# these lines in a fresh venv, from the checkout, then drives the installed commands:
+cd ~/src/sealref
+pip install .                                # macOS: no extra dependencies
+pip install '.[keyring]'                     # Linux and Windows
 ```
 
 The `bin/` launchers run `python3 -I`, which ignores user-site packages and
@@ -206,6 +208,15 @@ call `request_secret` instead of asking you to paste a key.
 claude mcp add sealref --scope user -- \
   uv run --directory /absolute/path/to/sealref --with "mcp==1.29.0" \
   python -m sealref.mcp_server
+```
+
+Or, from a venv with sealref installed (see Install; this is the form CI tests
+end to end against the installed package, with `pip install 'mcp==1.29.0'` added
+to that venv; Python 3.10+ for `mcp`):
+
+```sh
+claude mcp add sealref --scope user -- /absolute/path/to/venv/bin/python -m sealref.mcp_server
+# Windows: C:\absolute\path\to\venv\Scripts\python.exe -m sealref.mcp_server
 ```
 
 Equivalent `.mcp.json`:
