@@ -188,7 +188,7 @@ class NameValidationTest(unittest.TestCase):
         self.assertEqual(r, "sealref://g/API_KEY")
         self.assertIn("API_KEY", store.list_keys("g"))
         argv = mock_run.call_args[0][0]
-        self.assertEqual(argv, ["security", "-i"])
+        self.assertEqual(argv, ["/usr/bin/security", "-i"])  # never PATH-resolved
         self.assertNotIn("secretvalue", " ".join(argv))  # never in argv
         self.assertIn('-w "secretvalue"', mock_run.call_args[1]["input"])
 
@@ -235,6 +235,34 @@ class NameValidationTest(unittest.TestCase):
             returncode=0, stdout="", stderr="add-generic-password: returned -128\n")
         with self.assertRaises(RuntimeError):
             store.set_secret("g", "K", "value")
+
+    def test_keychain_calls_use_absolute_security_path(self):
+        with mock.patch("sealref.store.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="v\n", stderr="")
+            store.set_secret("g", "K", "value")
+            store._resolve("g", "K")
+            store.delete("g", "K")
+        self.assertEqual({c[0][0][0] for c in run.call_args_list}, {"/usr/bin/security"})
+
+    def test_failed_keychain_delete_keeps_index_entry(self):
+        with mock.patch("sealref.store.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            store.set_secret("g", "K", "value")
+            run.return_value = mock.Mock(returncode=1, stdout=b"", stderr=b"")
+            with self.assertRaises(RuntimeError):
+                store.delete("g", "K")
+            self.assertIn("K", store.list_keys("g"))  # value may still exist: stay visible
+            run.return_value = mock.Mock(returncode=44, stdout=b"", stderr=b"")  # not found
+            store.delete("g", "K")
+            self.assertNotIn("K", store.list_keys("g"))
+
+    def test_index_temp_file_is_unique_and_not_followed(self):
+        victim = os.path.join(self.tmpdir, "victim")
+        open(victim, "w").close()
+        os.symlink(victim, os.path.join(self.tmpdir, "index.json.tmp"))
+        store.create_group("g")
+        self.assertEqual(os.path.getsize(victim), 0)
+        self.assertIn("g", store.list_groups())
 
     def test_vault_dir_mode_repaired(self):
         os.chmod(self.tmpdir, 0o755)
@@ -433,6 +461,18 @@ class RedactionGapsTest(unittest.TestCase):
         rc, out = self._run_child('head -c 70000 /dev/zero | tr "\\0" x; printf %s "$K"')
         self.assertNotIn("DUMMY", out)
         self.assertIn("«redacted:g/K»", out)
+
+    def test_ref_alias_must_be_an_env_name(self):
+        import contextlib
+        import io
+        from sealref import cli
+        err = io.StringIO()
+        with mock.patch.object(store, "_resolve", return_value="sk-test-DUMMY") as res, \
+                contextlib.redirect_stderr(err):
+            for alias in ("A=B", "1X", "A-B", "A B"):
+                self.assertEqual(cli.main(["run", "--ref", f"sealref://g/K={alias}", "--", "true"]), 2)
+        res.assert_not_called()
+        self.assertIn("invalid key name", err.getvalue())
 
     def test_keychain_read_failure_is_a_clean_error(self):
         import contextlib

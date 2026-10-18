@@ -186,6 +186,8 @@ def cmd_run(rest):
 
     for r in refs:
         ref_str, _, envname = r.partition("=")
+        if envname:
+            store._validate_key(envname)  # same rule as key names: a valid env var name
         group, key = store.parse_ref(ref_str)
         value = store._resolve(group, key)
         env[envname or key] = value

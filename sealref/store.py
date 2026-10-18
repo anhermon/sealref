@@ -6,10 +6,15 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 
 VAULT_DIR = os.path.expanduser("~/.vaultlet")
 INDEX_PATH = os.path.join(VAULT_DIR, "index.json")
+
+# Absolute path: a `security` earlier on PATH (a repo's bin/, a direnv
+# .envrc) would otherwise receive every value set_secret writes.
+SECURITY = "/usr/bin/security"
 
 GROUP_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -35,8 +40,9 @@ def _load_index() -> dict:
 def _save_index(index: dict) -> None:
     os.makedirs(VAULT_DIR, mode=0o700, exist_ok=True)
     os.chmod(VAULT_DIR, 0o700)  # also repairs dirs made 0755 by old versions
-    tmp_path = INDEX_PATH + ".tmp"
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Unique, O_EXCL, 0600: no fixed name to pre-plant a symlink at, and two
+    # writers (UI thread + MCP) never share a temp file.
+    fd, tmp_path = tempfile.mkstemp(dir=VAULT_DIR, prefix=".index.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(index, f, indent=2)
@@ -119,7 +125,7 @@ def set_secret(group: str, key: str, value: str, require_approval: bool = False)
            f'add-generic-password {item} -w "{esc(value)}"{acl}\n')
     if max(len(line.encode()) for line in cmd.splitlines()) > MAX_COMMAND_BYTES:
         raise ValueError("value too long (sealref stores values up to about 2900 bytes)")
-    r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True)
+    r = subprocess.run([SECURITY, "-i"], input=cmd, capture_output=True, text=True)
     # A missing item makes the delete line report "returned -25300"; only the
     # add line decides success.
     if r.returncode != 0 or "add-generic-password: returned" in r.stdout + r.stderr:
@@ -136,10 +142,14 @@ def set_secret(group: str, key: str, value: str, require_approval: bool = False)
 def delete(group: str, key: str) -> None:
     _validate_group(group)
     _validate_key(key)
-    subprocess.run(
-        ["security", "delete-generic-password", "-a", key, "-s", f"vaultlet:{group}"],
+    r = subprocess.run(
+        [SECURITY, "delete-generic-password", "-a", key, "-s", f"vaultlet:{group}"],
         capture_output=True,
     )
+    # 44 = errSecItemNotFound: already gone. Anything else means the value may
+    # still be in the Keychain, so keep its index entry visible.
+    if r.returncode not in (0, 44):
+        raise RuntimeError(f"keychain delete of {group}/{key} failed (security exit {r.returncode})")
     index = _load_index()
     if group in index["groups"]:
         index["groups"][group]["keys"].pop(key, None)
@@ -161,7 +171,7 @@ RESOLVE_TIMEOUT = 120  # long enough to answer a Keychain approval dialog
 def _resolve(group: str, key: str) -> str:
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w"],
+            [SECURITY, "find-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w"],
             capture_output=True,
             text=True,
             timeout=RESOLVE_TIMEOUT,
