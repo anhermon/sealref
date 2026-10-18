@@ -181,8 +181,9 @@ The `bin/` launchers run `python3 -I`, which ignores user-site packages and
 `PATH`, `pipx`, or your distro's `python3-keyring`), not with `pip install --user`.
 
 On Linux the keystore must be unlocked in a D-Bus session (a desktop login, or
-`dbus-run-session -- sh -c 'echo PASSWORD | gnome-keyring-daemon --unlock
---components=secrets; ...'` on a headless box). sealref uses only OS keystores:
+`dbus-run-session -- sh -c 'read -rs PW; printf %s "$PW" | gnome-keyring-daemon --unlock
+--components=secrets; ...'` on a headless box; `read -s` keeps the password out
+of shell history, unlike `echo PASSWORD |`). sealref uses only OS keystores:
 it refuses `keyrings.alt` plaintext or encrypted-file keyrings and keyring's
 `fail`/`null` backends, with an error such as `no secure OS keyring available`,
 and never falls back to them.
@@ -252,7 +253,8 @@ design; see [Threat model](#threat-model) for what it does and does not buy you.
 ```
 sealref groups
 sealref keys <group>
-sealref ui [--port N]
+sealref ui [--port N] [--no-browser]
+sealref set <group> <key>       # hidden prompt; or pipe from a file/password manager
 sealref request <group> <key> [--reason TEXT]
 sealref run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 ```
@@ -276,7 +278,10 @@ file instead of your default keychain (the test suite uses this).
 The keyring backend resolves `keyring.get_keyring()` (looking inside a
 `ChainerBackend`) and accepts only SecretService/libsecret, KWallet, Windows
 `WinVaultKeyring` and macOS; it talks to that backend directly, so an
-installed plaintext keyring is never used. There is deliberately no
+installed plaintext keyring is never used. The backend must be the real
+class that keyring's own module exports, so a `keyringrc.cfg` that points at a
+look-alike class is refused too; code that already runs as you inside the
+sealref process could still bypass any such check. There is deliberately no
 encrypted-file fallback: doing it safely needs an AEAD and a KDF (not in the
 standard library) and a passphrase prompt that `sealref run` cannot do
 unattended. Details and limits per OS are in [Limits](#limits).
@@ -337,11 +342,17 @@ wants the value.
   whole environment. Prefer `--ref` for only the keys a command needs.
 - Redaction is line-based. A value split across lines can pass through.
   (Output without a final newline, and very long lines, are still redacted.)
-- Redaction catches the raw value; its URL-quoted form; lower- and upper-case
-  hex; and its base64 and URL-safe base64, including when they are encoded
-  together with other text, such as an HTTP Basic `user:key` credential.
+- Redaction catches the raw value; its percent-encoded form as
+  `urllib.parse.quote` (with or without `safe=""`) and `quote_plus` produce it,
+  in upper- or lower-case hex; its lower- and upper-case hex; and its base64
+  and URL-safe base64, including when they are encoded together with other text, such as an HTTP Basic `user:key` credential.
   Anything else is not caught: reversed, partial, case-changed, hashed, or
   otherwise transformed values.
+- Only the child's stdout and stderr are scrubbed. A value the child writes to
+  a file (a log, a crash dump, `terraform` state, `npm run dev > log.txt`) or
+  to `/dev/tty` is **not** redacted, and if the agent then reads that file the
+  value is in the transcript. Do not let the agent read files a secret-bearing
+  command wrote.
 - Values shorter than 4 characters are not redacted (a warning is printed).
 - Values cannot contain control characters (newline, tab, ...) and are
   limited to about 2900 bytes. Longer values would not stay inside one
