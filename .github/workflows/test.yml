@@ -64,5 +64,5 @@ jobs:
           echo dummy-ci-value-123 | sealref set ci CI_KEY
           sealref run --ref sealref://ci/CI_KEY -- python -c "import os; print(os.environ['CI_KEY'])" | tee out.txt
           grep -q "redacted:ci/CI_KEY" out.txt
-          ! grep -q dummy-ci-value-123 out.txt
+          if grep -q dummy-ci-value-123 out.txt; then echo "value leaked"; exit 1; fi
           python -c "from sealref import store; store.delete('ci','CI_KEY')"

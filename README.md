@@ -56,7 +56,7 @@ the MCP server runs through `uv`.
 **How do I keep secrets out of Claude Code's context?**
 Register the sealref MCP server and have the agent use `request_secret` and
 `sealref run` instead of asking you to paste a key. The value goes from a
-browser form on 127.0.0.1 into the Keychain, and the agent only receives
+browser form on 127.0.0.1 into the OS keystore, and the agent only receives
 `sealref://group/KEY` refs. Output that echoes the key (raw, base64 or
 URL-encoded, line by line) is replaced by `«redacted:group/KEY»`.
 
@@ -98,6 +98,7 @@ Per platform:
 | Store | Keychain via `/usr/bin/security` (no dependencies) | Secret Service (GNOME Keyring, KeePassXC) or KWallet, via `keyring` | Credential Manager, via `keyring` |
 | Per-read approval | yes (opt-in) | no | no |
 | Value size | about 2900 bytes | none enforced | about 1280 characters (2560 bytes UTF-16); longer is refused before writing |
+| Replacing a value | old value kept if the write fails; a failed replace says whether it was kept or deleted | overwritten in place | the `keyring` library re-saves the old credential under a second target (`<key>@vaultlet:<group>`) before writing, so a replaced value **lingers in Credential Manager until you delete that key** (delete removes both). Read from keyring's source; not run |
 | `~/.vaultlet` 0700 / index 0600 | enforced | enforced | not enforced (no POSIX modes); the folder inherits your profile's ACL, which already excludes other users |
 | Headless / no desktop session | n/a | needs an unlocked Secret Service on a D-Bus session; otherwise sealref refuses | n/a |
 | Tested | real Keychain (throwaway file) in the suite | real gnome-keyring in Docker | **not run by the author**; CI job written, never executed |
@@ -115,7 +116,7 @@ browser with Python's `webbrowser` on all three systems.
 
 The agent asks for a missing secret through an MCP tool, `request_secret`. A
 local page opens in your browser, you type the value there, and it is stored in
-the macOS Keychain; the agent gets back only the reference
+the OS keystore (macOS Keychain, Secret Service, Credential Manager); the agent gets back only the reference
 `sealref://stripe/API_KEY`. To use the key, the agent runs its command through
 `sealref run`, which puts the value into that one process's environment and
 replaces the raw value and its base64 / URL-encoded forms in the child's
