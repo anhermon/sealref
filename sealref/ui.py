@@ -5,6 +5,7 @@ No route ever returns a secret value. store.py's value-reading functions
 """
 import hmac
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -31,6 +32,7 @@ def _group_view(group):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "sealref/1"
+    timeout = 10  # seconds a client may stall mid-request; frees the handler thread
 
     def log_message(self, fmt, *args):
         pass  # no access log: request lines would land in the MCP client's stderr log
@@ -145,7 +147,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # Command that opens a URL (appended as the last argument). Tests replace it.
-_BROWSER_HELPER = [sys.executable, "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])"]
+# -I: no cwd / PYTHONPATH / user-site on sys.path, so a webbrowser.py planted in
+# the repo you run sealref from is not imported (it would receive the token URL).
+_BROWSER_HELPER = [sys.executable, "-I", "-c", "import sys, webbrowser; webbrowser.open(sys.argv[1])"]
 
 
 def _open_browser(url):
@@ -160,6 +164,7 @@ def _open_browser(url):
         proc = subprocess.Popen(
             [*_BROWSER_HELPER, url],
             stdin=subprocess.DEVNULL,
+            cwd=os.path.expanduser("~"),  # not the (possibly untrusted) project dir
             stdout=2,
         )
     except OSError as e:

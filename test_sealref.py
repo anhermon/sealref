@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -56,7 +57,7 @@ class SchemeTest(unittest.TestCase):
 
     def test_keychain_service_name_unchanged(self):
         with mock.patch("sealref.store.subprocess.run") as run:
-            run.return_value.stdout = "v\n"
+            run.return_value.stderr = 'password: "v"\n'
             run.return_value.returncode = 0
             store._resolve("g", "K")
             self.assertIn("vaultlet:g", run.call_args[0][0])
@@ -248,7 +249,7 @@ class NameValidationTest(unittest.TestCase):
 
     def test_keychain_calls_use_absolute_security_path(self):
         with mock.patch("sealref.store.subprocess.run") as run:
-            run.return_value = mock.Mock(returncode=0, stdout="v\n", stderr="")
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr='password: "v"\n')
             store.set_secret("g", "K", "value")
             store._resolve("g", "K")
             store.delete("g", "K")
@@ -472,6 +473,26 @@ class UiGuardTest(unittest.TestCase):
                 ui.serve(0, open_browser=False)
         ob.assert_not_called()
 
+    def test_r210_stalled_body_is_dropped(self):
+        import socket
+        import time
+        from sealref import ui
+        self.assertIsNotNone(ui.Handler.timeout)
+        with mock.patch.object(ui.Handler, "timeout", 1):
+            s = socket.create_connection(("127.0.0.1", self.port))
+            s.settimeout(8)
+            s.sendall((f"POST /api/keys HTTP/1.0\r\nHost: 127.0.0.1:{self.port}\r\n"
+                       f"X-Vaultlet: {self.server.token}\r\nContent-Length: 100\r\n\r\n").encode())
+            t0 = time.time()
+            try:
+                while s.recv(4096):  # server gives up and closes (maybe after an error reply)
+                    pass
+            except socket.timeout:
+                self.fail("server kept waiting for the body")
+            finally:
+                s.close()
+            self.assertLess(time.time() - t0, 6)
+
     def test_oversized_body_refused(self):
         big = json.dumps({"group": "g", "key": "K", "value": "x" * (ui_max() + 1)})
         self.assertEqual(self._req("POST", "/api/keys", body=big,
@@ -655,8 +676,22 @@ class FakeKeyringBackend:
     """In-memory keyring backend. `module`/`name` are what the allow-list sees."""
     priority = 1
 
+    _classes = {}
+
     def __init__(self, module, name, store=None):
-        self.__class__ = type(name, (FakeKeyringBackend,), {"__module__": module})
+        key = (module, name)
+        if key not in self._classes:
+            self._classes[key] = type(name, (FakeKeyringBackend,), {"__module__": module})
+        cls = self._classes[key]
+        self.__class__ = cls
+        # The allow-list checks the class object really lives in that module
+        # (tests run under mock.patch.dict(sys.modules): see FakeKeyringCase).
+        mod = sys.modules.get(module)
+        if mod is None or not getattr(mod, "_is_fake", False):
+            mod = types.ModuleType(module)
+            mod._is_fake = True
+            sys.modules[module] = mod
+        setattr(mod, name, cls)
         self.d = store if store is not None else {}
         self.calls = []
 
@@ -699,7 +734,14 @@ INSECURE = [("keyring.backends.fail", "Keyring"), ("keyring.backends.null", "Key
             ("some.other.pkg", "Keyring")]
 
 
-class KeyringAllowListTest(unittest.TestCase):
+class FakeKeyringCase(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.dict(sys.modules)  # fakes register fake keyring.* modules; restore after
+        p.start()
+        self.addCleanup(p.stop)
+
+
+class KeyringAllowListTest(FakeKeyringCase):
     def test_secure_backends_accepted(self):
         for mod, name in SECURE:
             b = backends.Keyring(fake_kr(FakeKeyringBackend(mod, name)))
@@ -739,6 +781,20 @@ class KeyringAllowListTest(unittest.TestCase):
                 store.set_secret("g", "K", "dummy")
         self.assertEqual(kr.get_keyring().d, {})
 
+    def test_lookalike_class_claiming_a_keyring_module_is_refused(self):
+        """A class loaded via keyringrc.cfg can set __module__ to anything."""
+        real = FakeKeyringBackend("keyring.backends.SecretService", "Keyring")
+        spoof = type("Keyring", (), {"__module__": "keyring.backends.SecretService",
+                                     "priority": 9})()
+        self.assertIsNot(type(spoof), type(real))
+        with self.assertRaisesRegex(RuntimeError, "no secure OS keyring"):
+            backends.Keyring(fake_kr(spoof))
+        # a subclass of the real class is not the real class either
+        sub = object.__new__(type("Keyring", (type(real),), {"__module__": "keyring.backends.SecretService"}))
+        with self.assertRaisesRegex(RuntimeError, "no secure OS keyring"):
+            backends.Keyring(fake_kr(sub))
+        backends.Keyring(fake_kr(real))  # the real one still passes
+
     def test_missing_lib_message(self):
         with mock.patch.dict(sys.modules, {"keyring": None}):
             with self.assertRaisesRegex(RuntimeError, r"sealref\[keyring\]"):
@@ -757,8 +813,9 @@ class KeyringAllowListTest(unittest.TestCase):
                 self.assertEqual(backends.get_backend().name, want)
 
 
-class KeyringBehaviourTest(unittest.TestCase):
+class KeyringBehaviourTest(FakeKeyringCase):
     def setUp(self):
+        super().setUp()
         self.inner = FakeKeyringBackend("keyring.backends.SecretService", "Keyring")
         self.b = backends.Keyring(fake_kr(self.inner))
 
@@ -851,8 +908,8 @@ class MacSavePathTest(unittest.TestCase):
         def run(argv, **kw):
             calls.append((argv, kw))
             if argv[1] == "find-generic-password":
-                return mock.Mock(returncode=0 if seq.pop(0) else 44, stdout="", stderr="")
-            return mock.Mock(returncode=write_rc, stdout="", stderr=write_err)
+                return mock.Mock(returncode=0 if seq.pop(0) else 44, stdout="", stderr='password: "v"')
+            return mock.Mock(returncode=write_rc, stdout="", stderr=write_err or 'password: "v"')
         return run, calls
 
     def test_first_save_has_no_delete_line(self):
@@ -895,15 +952,17 @@ class MacSavePathTest(unittest.TestCase):
 
     def test_keychain_file_option_is_appended_to_every_command(self):
         run, calls = self._fake([True, True])
-        with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": "/tmp/x y.keychain-db"}), \
+        kcpath = os.path.join(self.tmpdir, "x y.keychain-db")
+        open(kcpath, "w").close()
+        with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": kcpath}), \
                 mock.patch("sealref.store.subprocess.run", run):
             store.set_secret("g", "K", "value")
             store._resolve("g", "K")
             store.delete("g", "K")
         script = [c for c in calls if c[0][1] == "-i"][0][1]["input"]
-        self.assertTrue(all(l.endswith(' "/tmp/x y.keychain-db"') for l in script.splitlines()), script)
+        self.assertTrue(all(l.endswith(' "%s"' % kcpath) for l in script.splitlines()), script)
         others = [c[0] for c in calls if c[0][1] != "-i"]
-        self.assertTrue(others and all(a[-1] == "/tmp/x y.keychain-db" for a in others), others)
+        self.assertTrue(others and all(a[-1] == kcpath for a in others), others)
         with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": "a\nb"}):
             with self.assertRaises(ValueError):
                 backends.MacKeychain()
@@ -1019,6 +1078,28 @@ class MacThrowawayKeychainTest(unittest.TestCase):
             store._resolve("rt", "DUMMY_KEY")
         store.delete("rt", "DUMMY_KEY")  # already gone: fine
 
+    def test_r26_non_ascii_and_hexlike_values_round_trip_and_run(self):
+        import contextlib
+        import io
+        from sealref import cli
+        for key, value in (("NA", "pässwörd-ключ-🔑-dummy"), ("HEXLIKE", "abcdef0123456789"),
+                           ("QUOTES", 'q"uo\\te\' dummy')):
+            store.set_secret("na", key, value)
+            self.assertEqual(store._resolve("na", key), value, key)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_run(["--ref", "sealref://na/NA", "--", sys.executable, "-c",
+                              "import os, sys; sys.stdout.buffer.write(os.environ['NA'].encode('utf-8') + b'\\n')"])
+        self.assertEqual((rc, buf.getvalue()), (0, "«redacted:na/NA»\n"))  # child got the real value
+
+    def test_r27_delete_with_missing_keychain_keeps_item_and_index(self):
+        store.set_secret("mk", "K", "dummy-value")
+        with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": self.kc + ".missing"}):
+            with self.assertRaises(RuntimeError):
+                store.delete("mk", "K")
+        self.assertIn("K", store.list_keys("mk"))
+        self.assertEqual(store._resolve("mk", "K"), "dummy-value")  # still in the real throwaway keychain
+
     def test_approval_acl_present_only_when_opted_in(self):
         store.set_secret("acl", "OPEN_KEY", "dummy-open-value")
         store.set_secret("acl", "GATED_KEY", "dummy-gated-value", require_approval=True)
@@ -1034,6 +1115,91 @@ class MacThrowawayKeychainTest(unittest.TestCase):
         store.set_secret("acl", "K", "dummy-one", require_approval=True)
         store.set_secret("acl", "K", "dummy-two")  # replace and drop the gate
         self.assertEqual(store._resolve("acl", "K"), "dummy-two")
+
+class R2RegressionTest(unittest.TestCase):
+    """Findings from the second review; each fails on the code before the fix."""
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+
+    @unittest.skipIf(sys.platform == "win32", "BROWSER parsing is POSIX shlex")
+    def test_r21_real_browser_helper_ignores_planted_webbrowser_module(self):
+        import time
+        from sealref import ui
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        plant, ran, hijacked = (os.path.join(tmp, n) for n in ("plant", "ran", "hijacked"))
+        os.mkdir(plant)
+        with open(os.path.join(plant, "webbrowser.py"), "w") as f:
+            f.write(f"open({hijacked!r}, 'w').close()\ndef open(url): pass\n")
+        with open(os.path.join(tmp, "br.py"), "w") as f:  # the "browser" the real helper launches
+            f.write(f"import sys; open({ran!r}, 'w').write(sys.argv[1])\n")
+        env = {"BROWSER": f"{sys.executable} {os.path.join(tmp, 'br.py')} %s"}
+        old = os.getcwd()
+        os.chdir(plant)  # the "untrusted repo" sealref is run from
+        self.addCleanup(os.chdir, old)
+        with mock.patch.dict(os.environ, env):
+            ui._open_browser("http://127.0.0.1:1/#t=tok")  # the REAL helper, not a stub
+            for _ in range(100):
+                if os.path.exists(ran):
+                    break
+                time.sleep(0.1)
+        self.assertTrue(os.path.exists(ran), "real helper did not launch the browser command")
+        self.assertFalse(os.path.exists(hijacked), "helper imported webbrowser.py from the cwd")
+        self.assertIn("-I", ui._BROWSER_HELPER)
+
+    def test_r22_url_quoting_variants_redacted(self):
+        from urllib.parse import quote, quote_plus
+        v = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY+x y&z="
+        needles = _build_needles([("g", "K", v)])
+        lowhex = lambda s: re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), s)
+        forms = [quote(v, safe=""), quote(v), quote_plus(v), quote_plus(v, safe="/"),
+                 lowhex(quote(v)), lowhex(quote_plus(v))]
+        for f in forms:
+            out = _redact_line(f"x {f} y\n", needles)
+            self.assertNotIn(f, out, f)
+            self.assertIn("«redacted:g/K»", out, f)
+
+    def test_r24_windows_lookup_ignores_cwd_and_relative_path_entries(self):
+        from sealref import cli
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        cwd, bindir = os.path.join(tmp, "cwd"), os.path.join(tmp, "bin")
+        os.mkdir(cwd)
+        os.mkdir(bindir)
+        open(os.path.join(cwd, "tool.cmd"), "w").close()
+        old = os.getcwd()
+        os.chdir(cwd)
+        self.addCleanup(os.chdir, old)
+        path = os.pathsep.join(["", ".", "bin-relative", bindir])
+        self.assertIsNone(cli._which_path_only("tool", path, [".EXE", ".CMD"]))  # only in cwd
+        open(os.path.join(bindir, "tool.CMD"), "w").close()
+        self.assertEqual(cli._which_path_only("tool", path, [".EXE", ".CMD"]),
+                         os.path.join(bindir, "tool.CMD"))
+        self.assertEqual(cli._which_path_only(os.path.join(".", "tool"), path, [".CMD"]),
+                         os.path.join(".", "tool"))  # explicit path is the user's choice
+
+    def test_r26_parse_g_output(self):
+        p = backends._parse_g_password
+        self.assertEqual(p('keychain: "x"\npassword: "plain value"\n', "g", "K"), "plain value")
+        self.assertEqual(p('password: 0x70C3A4  "p\\303\\244"\n', "g", "K"), "pä")
+        self.assertEqual(p('password: "abcdef012345"\n', "g", "K"), "abcdef012345")  # hex-looking text stays text
+        for bad in ("", "password: 0xZZ\n", "nothing\n"):
+            with self.assertRaises(RuntimeError):
+                p(bad, "g", "K")
+
+    def test_r27_missing_keychain_file_is_not_item_not_found(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.multiple(store, VAULT_DIR=tmp, INDEX_PATH=os.path.join(tmp, "index.json")), \
+                mock.patch.dict(os.environ, {"SEALREF_BACKEND": "macos", "SEALREF_KEYCHAIN": ""}):
+            with mock.patch("sealref.store.subprocess.run") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                store.set_secret("g", "K", "dummy-value")
+            os.environ["SEALREF_KEYCHAIN"] = os.path.join(tmp, "no-such.keychain-db")
+            with mock.patch("sealref.store.subprocess.run", return_value=mock.Mock(returncode=44)) as run:
+                with self.assertRaisesRegex(RuntimeError, "does not exist"):
+                    store.delete("g", "K")
+                run.assert_not_called()
+            self.assertIn("K", store.list_keys("g"))
 
 
 if __name__ == "__main__":

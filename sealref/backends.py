@@ -38,6 +38,22 @@ def _has_control(s: str) -> bool:
     return any(ord(c) < 0x20 or ord(c) == 0x7F for c in s)
 
 
+def _parse_g_password(stderr, group, key):
+    """Value from `security find-generic-password -g` stderr: either
+    `password: "text"` or `password: 0xHEX  "escaped copy"` (non-ASCII)."""
+    for line in (stderr or "").splitlines():
+        if line.startswith("password:"):
+            body = line[len("password:"):].strip()
+            try:
+                if body.startswith("0x"):
+                    return bytes.fromhex(body[2:].split()[0]).decode("utf-8")
+                if body.startswith('"') and body.endswith('"') and len(body) >= 2:
+                    return body[1:-1]
+            except ValueError:
+                break
+    raise RuntimeError(f"keychain read of {group}/{key} returned an unreadable value")
+
+
 class MacKeychain:
     name = "macos"
 
@@ -53,6 +69,10 @@ class MacKeychain:
         return [self.keychain] if self.keychain else []
 
     def _run(self, args, **kw):
+        # Exit 44 means "item not found" but also "no such keychain file";
+        # refuse the second so delete can never mistake it for "already gone".
+        if self.keychain and not os.path.exists(self.keychain):
+            raise RuntimeError(f"keychain file {self.keychain!r} (SEALREF_KEYCHAIN) does not exist")
         return subprocess.run([SECURITY, *args, *self._kc_argv()], capture_output=True, **kw)
 
     def _exists(self, group, key):
@@ -62,7 +82,8 @@ class MacKeychain:
 
     def get(self, group, key):
         try:
-            r = self._run(["find-generic-password", "-a", key, "-s", _service(group), "-w"],
+            # -g, not -w: -w prints hex for non-ASCII values, -g labels it ("0x...").
+            r = self._run(["find-generic-password", "-a", key, "-s", _service(group), "-g"],
                           text=True, timeout=RESOLVE_TIMEOUT)
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"keychain read of {group}/{key} timed out; "
@@ -71,9 +92,11 @@ class MacKeychain:
             # stderr from find-generic-password names the item, never the value.
             raise RuntimeError(f"keychain read of {group}/{key} failed or was denied "
                                f"(security exit {r.returncode})")
-        return r.stdout.rstrip("\n")
+        return _parse_g_password(r.stderr, group, key)
 
     def set(self, group, key, value, require_approval=False):
+        if self.keychain and not os.path.exists(self.keychain):
+            raise RuntimeError(f"keychain file {self.keychain!r} (SEALREF_KEYCHAIN) does not exist")
         # The value goes to `security -i` on stdin, not argv, so it never
         # appears in `ps`. security's command parser takes double-quoted
         # strings with backslash escapes.
@@ -128,10 +151,17 @@ WIN_BLOB_MAX = 2560  # CRED_MAX_CREDENTIAL_BLOB_SIZE, bytes of UTF-16
 
 
 def _is_secure(b) -> bool:
-    mod, cls = type(b).__module__, type(b).__name__
+    """True only for the real class object living in keyring's own module.
+    Matching __module__/__name__ strings is not enough: a class loaded from a
+    keyringrc.cfg can claim any module name, but it cannot be the object that
+    keyring.backends.<X> exports (a subclass fails too)."""
+    t = type(b)
+    mod, cls = t.__module__, t.__name__
     if mod == "keyring.backends.Windows":
-        return cls == "WinVaultKeyring"
-    return mod in _SECURE_MODULES
+        ok = cls == "WinVaultKeyring"
+    else:
+        ok = mod in _SECURE_MODULES
+    return ok and getattr(sys.modules.get(mod), cls, None) is t
 
 
 def _leaves(b):

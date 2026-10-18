@@ -1,7 +1,7 @@
 """CLI entry points."""
 import base64
 import os
-import shutil
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -45,9 +45,14 @@ def _build_needles(secrets):
             continue
         replacement = f"«redacted:{group}/{key}»"
         raw = value.encode()
+        # Percent-encodings in the forms libraries emit: strict, default
+        # (safe="/"), quote_plus (space -> +), each also in lowercase hex.
+        quoted = {urllib.parse.quote(value, safe=""), urllib.parse.quote(value),
+                  urllib.parse.quote_plus(value), urllib.parse.quote_plus(value, safe="/")}
+        quoted |= {re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), q) for q in quoted}
         variants = {
             value,
-            urllib.parse.quote(value, safe=""),
+            *quoted,
             raw.hex(),
             raw.hex().upper(),
         }
@@ -77,6 +82,24 @@ def _redact_line(line, needles):
     return line
 
 
+def _which_path_only(cmd, path, pathext):
+    """Like shutil.which, but never the current directory: Windows' which()
+    prepends it, so a planted npm.cmd in a repo would run with the secrets.
+    Only absolute PATH entries count. A command given with a directory part
+    (`.\\tool`, `C:\\x\\tool`) is the user's explicit choice and is kept."""
+    if os.path.dirname(cmd):
+        return cmd
+    exts = [""] if os.path.splitext(cmd)[1] else [""] + [e for e in pathext if e]
+    for d in path.split(os.pathsep):
+        if not d or not os.path.isabs(d):
+            continue
+        for e in exts:
+            cand = os.path.join(d, cmd + e)
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
 def cmd_groups(rest):
     for group in store.list_groups():
         print(group)
@@ -102,7 +125,7 @@ def cmd_set(rest):
         import getpass
         value = getpass.getpass(f"value for {group}/{key} (hidden): ")
     else:
-        value = sys.stdin.read().rstrip("\r\n")  # piped: keeps the value out of argv and history
+        value = sys.stdin.read().rstrip("\r\n")  # piped: out of argv; prefer the prompt or a file, since `echo VALUE |` lands in shell history
     print(store.set_secret(group, key, value))
     return 0
 
@@ -219,7 +242,9 @@ def cmd_run(rest):
     # transformed in a way not listed in _build_needles) is not caught.
     if sys.platform == "win32":
         # CreateProcess does not search PATHEXT, so `npm` (npm.cmd) would not start.
-        child_cmd = [shutil.which(child_cmd[0], path=env.get("PATH")) or child_cmd[0], *child_cmd[1:]]
+        child_cmd = [_which_path_only(child_cmd[0], env.get("PATH", ""),
+                                      env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";"))
+                     or child_cmd[0], *child_cmd[1:]]
     try:
         proc = subprocess.Popen(
             child_cmd,
