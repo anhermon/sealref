@@ -284,7 +284,7 @@ PAGE = """<!doctype html>
 <body>
 <main>
   <h1>sealref</h1>
-  <div class="sub">Values go to the macOS Keychain from this page — never into the agent chat.</div>
+  <div class="sub">Values go to your OS keystore from this page — never into the agent chat.</div>
   <div id="banner"></div>
   <div class="new-group">
     <input id="new-group-name" type="text" placeholder="new group name">
@@ -409,7 +409,7 @@ function renderGroup(g) {
     </span>
     <button class="primary add-btn">Save</button>
     <label class="approve"><input type="checkbox" class="approve-input">
-      Ask me in a macOS Keychain dialog every time this secret is read</label>
+      Ask me in a macOS Keychain dialog every time this secret is read (macOS only)</label>
   `;
   const keyInput = addRow.querySelector('.key-input');
   const valInput = addRow.querySelector('.val-input');

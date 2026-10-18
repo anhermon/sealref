@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Linux and Windows support through the optional `keyring` extra
+  (`pip install 'sealref[keyring]'`), plus `sealref set <group> <key>` (hidden
+  prompt or stdin) and `sealref` / `vaultlet` console scripts. Only OS keystores
+  are accepted (SecretService/libsecret, KWallet, Windows Credential Manager,
+  macOS); plaintext/file keyrings and keyring's `fail`/`null` backends are
+  refused with no fallback. Keychain approval is macOS-only. Windows has not
+  been run.
+- Replacing a Keychain secret no longer risks silent loss: a first-time save
+  never deletes anything, and a failed replace says whether the previous value
+  was kept or deleted.
+- The local page refuses request bodies over 64 KiB, and its Quit button ends a
+  pending `request_secret` immediately instead of after 300 s.
+- `sealref run` exits `128+N` for a child killed by signal N and 127/126 when
+  the command cannot be started, instead of a traceback.
+- `SEALREF_KEYCHAIN=<file>` selects a keychain file for the macOS backend.
+- CI matrix: macOS, Linux (gnome-keyring under dbus-run-session), Windows.
+
 - Security fixes from the 2026-10-17 red-team review (see SECURITY-REVIEW.md):
   - The local page's API needs a per-launch token, carried in the link sealref
     opens. A bookmarked `http://127.0.0.1:8765/` without `#t=...` no longer

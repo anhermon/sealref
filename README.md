@@ -2,7 +2,8 @@
 
 Give AI coding agents (Claude Code, Cursor, any MCP client) API keys and
 secrets without pasting them into chat: the agent works with references like
-`sealref://stripe/API_KEY`, and the key itself stays in your macOS Keychain.
+`sealref://stripe/API_KEY`, and the key itself stays in your OS keystore (macOS Keychain, Linux Secret
+Service, Windows Credential Manager).
 sealref is a local CLI plus an MCP server for secrets.
 
 ## Why
@@ -18,12 +19,13 @@ the shell before starting the agent, copy it by hand into each command, or set
 up a vault CLI and wire it into every command the agent runs.
 
 With sealref the agent only ever holds a `sealref://` ref. You type the value
-once into a local page, it goes into the Keychain, and `sealref run` injects it
+once into a local page, it goes into the OS keystore, and `sealref run` injects it
 into the one command that needs it and scrubs it from that command's output.
 
 ## Quickstart (3 steps)
 
-Requires macOS and Python 3; the MCP server runs through `uv`.
+Requires Python 3.9+ on macOS, Linux or Windows (see [Platforms](#platforms));
+the MCP server runs through `uv`.
 
 1. Install:
 
@@ -80,13 +82,34 @@ An agent that is actively trying to get the value. See the limits below and the
 
 ## Limits
 
-macOS Keychain only (no Linux or Windows backend), single user, no team
-sharing, audit log or rotation, and redaction is best-effort and line-based.
-It guards against accidental leaks into transcripts, not a hostile agent. An
-agent that can run shell commands as you can read any secret it can name,
-unless you store that secret with Keychain approval (see
-[Keychain approval](#keychain-approval)), and even then it can still get the
-value from a run you approve.
+Single user, no team sharing, audit log or rotation, and redaction is
+best-effort and line-based. It guards against accidental leaks into
+transcripts, not a hostile agent. An agent that can run shell commands as you
+can read any secret it can name. On macOS you can store a secret with Keychain
+approval (see [Keychain approval](#keychain-approval)) so every read raises a
+dialog, and even then it can still get the value from a run you approve. **On
+Linux and Windows there is no such gate**: any process running as you can read
+the item while the keystore is unlocked.
+
+Per platform:
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Store | Keychain via `/usr/bin/security` (no dependencies) | Secret Service (GNOME Keyring, KeePassXC) or KWallet, via `keyring` | Credential Manager, via `keyring` |
+| Per-read approval | yes (opt-in) | no | no |
+| Value size | about 2900 bytes | none enforced | about 1280 characters (2560 bytes UTF-16); longer is refused before writing |
+| `~/.vaultlet` 0700 / index 0600 | enforced | enforced | not enforced (no POSIX modes); the folder inherits your profile's ACL, which already excludes other users |
+| Headless / no desktop session | n/a | needs an unlocked Secret Service on a D-Bus session; otherwise sealref refuses | n/a |
+| Tested | real Keychain (throwaway file) in the suite | real gnome-keyring in Docker | **not run by the author**; CI job written, never executed |
+
+Other platform notes: `sealref run` exits `128+N` when the child dies of
+signal N (POSIX; Windows reports the child's own code); on Windows it resolves
+the command through `PATHEXT` so `npm` finds `npm.cmd`; the `bin/` launchers
+are POSIX shell scripts, and on Windows the pip-installed `sealref` and
+`vaultlet` commands are the entry point. Child output is decoded with the
+console's code page, so a non-ASCII secret printed by a child in a different
+encoding may not be recognised for redaction. The local page launches your
+browser with Python's `webbrowser` on all three systems.
 
 ## How sealref fixes it
 
@@ -138,15 +161,30 @@ the reference, not the value.
 
 ## Install
 
-Requires macOS and Python 3 (tested on 3.12). The CLI uses only the standard
-library. The MCP server needs `mcp` 1.x, run through `uv` so nothing is
+Requires Python 3.9+ (tested on 3.9 and 3.12). On macOS the CLI uses only the
+standard library. The MCP server needs `mcp` 1.x, run through `uv` so nothing is
 installed into your environment.
 
 ```sh
 git clone https://github.com/anhermon/sealref ~/src/sealref
-ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # or add bin/ to PATH
+ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # POSIX; or add bin/ to PATH
 brew install uv                                              # for the MCP server
+
+# or, on any OS, as real commands (this is the way on Windows):
+pip install ~/src/sealref                    # macOS: no extra dependencies
+pip install '~/src/sealref[keyring]'         # Linux and Windows
 ```
+
+The `bin/` launchers run `python3 -I`, which ignores user-site packages and
+`PYTHONPATH`: on Linux install `keyring` into the python3 they find (a venv on
+`PATH`, `pipx`, or your distro's `python3-keyring`), not with `pip install --user`.
+
+On Linux the keystore must be unlocked in a D-Bus session (a desktop login, or
+`dbus-run-session -- sh -c 'echo PASSWORD | gnome-keyring-daemon --unlock
+--components=secrets; ...'` on a headless box). sealref uses only OS keystores:
+it refuses `keyrings.alt` plaintext or encrypted-file keyrings and keyring's
+`fail`/`null` backends, with an error such as `no secure OS keyring available`,
+and never falls back to them.
 
 ## CLI basics
 
@@ -225,9 +263,26 @@ The child's stderr is merged into its stdout; both come out, redacted, on
 `run` does not expand `$VARS` itself; wrap in `sh -c` if the command line needs
 them. Group names match `[A-Za-z0-9_.-]+`; key names must be valid env var names.
 
+## Platforms
+
+Storage goes through a small backend interface (`sealref/backends.py`).
+Names stay in `~/.vaultlet/index.json` on every OS; values live in the
+keystore as service `vaultlet:<group>`, account `<key>` on all of them. Pick
+with `SEALREF_BACKEND=macos|keyring` (default `macos` on darwin, else
+`keyring`). `SEALREF_KEYCHAIN=<file>` points the macOS backend at one keychain
+file instead of your default keychain (the test suite uses this).
+
+The keyring backend resolves `keyring.get_keyring()` (looking inside a
+`ChainerBackend`) and accepts only SecretService/libsecret, KWallet, Windows
+`WinVaultKeyring` and macOS; it talks to that backend directly, so an
+installed plaintext keyring is never used. There is deliberately no
+encrypted-file fallback: doing it safely needs an AEAD and a KDF (not in the
+standard library) and a passphrase prompt that `sealref run` cannot do
+unattended. Details and limits per OS are in [Limits](#limits).
+
 ## How it works
 
-Values live in the Keychain: service `vaultlet:<group>`, account `<key>`. An
+Values live in the Keychain (macOS shown; see [Platforms](#platforms)): service `vaultlet:<group>`, account `<key>`. An
 index of group and key names (no values) is kept in `~/.vaultlet/index.json`,
 mode 0600. Writes pass the value to `security -i` on stdin, so it does not
 appear in `ps`. The management page binds to 127.0.0.1 only, rejects requests
@@ -301,7 +356,9 @@ wants the value.
   client may log) and is briefly visible in the browser-launcher's argv.
 - The MCP server's `mcp==1.29.0` pin covers only that package. Its
   dependencies resolve at launch and are not hash-locked.
-- macOS only. There is no Linux or Windows backend.
+- Linux and Windows backends are only as strong as the OS keystore: an
+  unlocked Secret Service or Credential Manager is readable by any process as
+  you, and there is no per-read approval. Windows support has not been run.
 
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.
 
@@ -329,7 +386,7 @@ See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review notes.
   values to the model put the value in the transcript, which is the case
   sealref exists to avoid.
 
-Do not use sealref if you need Linux or Windows, team sharing, audit logging,
+Do not use sealref if you need team sharing, audit logging,
 rotation, a hardened boundary against a hostile agent, or production secrets.
 
 ## Renamed from vaultlet (compatibility)
@@ -353,8 +410,16 @@ sealref was called vaultlet. Existing setups keep working, with one output chang
 python3 -m unittest -v test_sealref
 ```
 
-The Keychain round-trip test writes and deletes a Keychain item with service
-`vaultlet:sealref-test-integration` and account `TEST_KEY`. Set `SEALREF_SKIP_KEYCHAIN=1` (or legacy `VAULTLET_SKIP_KEYCHAIN=1`) to skip it.
+On macOS the suite also does a real round trip (set, get, ref, `run` with
+redaction, delete, approval ACL via `security dump-keychain -a`) against a
+**throwaway keychain file** it creates in a temp directory. That file is never
+added to the keychain search list and your login keychain is not touched.
+
+Linux end to end, against a real Secret Service in Docker:
+
+```sh
+docker build -f tests/linux/Dockerfile -t sealref-linux . && docker run --rm sealref-linux
+```
 
 ## License
 
