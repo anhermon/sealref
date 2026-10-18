@@ -960,7 +960,7 @@ class MacSavePathTest(unittest.TestCase):
             store._resolve("g", "K")
             store.delete("g", "K")
         script = [c for c in calls if c[0][1] == "-i"][0][1]["input"]
-        self.assertTrue(all(l.endswith(' "%s"' % kcpath) for l in script.splitlines()), script)
+        self.assertTrue(all(l.endswith(' "%s"' % kcpath.replace("\\", "\\\\")) for l in script.splitlines()), script)
         others = [c[0] for c in calls if c[0][1] != "-i"]
         self.assertTrue(others and all(a[-1] == kcpath for a in others), others)
         with mock.patch.dict(os.environ, {"SEALREF_KEYCHAIN": "a\nb"}):
