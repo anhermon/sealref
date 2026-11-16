@@ -1,3 +1,0 @@
-[console_scripts]
-sealref = sealref.cli:main
-vaultlet = vaultlet.__main__:main

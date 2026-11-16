@@ -171,6 +171,8 @@ sealref keys stripe              # key names and refs, no values
 sealref run --group stripe -- sh -c 'echo "key length: ${#API_KEY}"'
 ```
 
+Piping a value into `sealref set` keeps it out of argv, but piping from a literal or `echo "$V"` can still land it in shell history; the hidden prompt is the safe path.
+
 Then register the MCP server (next section) so your agent can list refs and
 call `request_secret` instead of asking you to paste a key.
 

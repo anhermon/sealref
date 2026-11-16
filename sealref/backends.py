@@ -16,6 +16,12 @@ import os
 import subprocess
 import sys
 
+try:
+    from keyring.errors import PasswordDeleteError
+except ImportError:  # keyring is optional; stand-in so fakes and the except clause still work
+    class PasswordDeleteError(Exception):
+        pass
+
 
 def _service(group: str) -> str:
     return f"vaultlet:{group}"
@@ -151,8 +157,10 @@ class Keyring:
             self._kr().delete_password(_service(group), key)
         except KeystoreUnavailable:
             raise  # no usable keyring is an error, "already absent" is not
-        except Exception:
-            pass  # already absent, same as the macOS path
+        except PasswordDeleteError:
+            pass  # entry not found: already absent, same as the macOS path
+        except Exception as e:  # locked keyring, D-Bus error: do not report a delete that did not happen
+            raise RuntimeError(f"keyring delete failed ({type(e).__name__})") from None
 
 
 def get_backend():

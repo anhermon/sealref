@@ -335,6 +335,26 @@ class UiBackendUnavailableTest(_Isolated):
         self.assertTrue(store.has("g", "API_KEY"))  # nothing was deleted from the index
 
 
+class KeyringDeleteFailureTest(_Isolated):
+    def test_backend_failure_propagates_and_keeps_index_entry(self):
+        store.set_secret("g", "API_KEY", FAKE_VALUE)
+
+        def locked(svc, user):
+            raise OSError(FAKE_VALUE)  # value must never reach the message
+        self.fake.delete_password = locked
+        with self.assertRaises(RuntimeError) as cm:
+            store.delete("g", "API_KEY")
+        self.assertIn("OSError", str(cm.exception))
+        self.assertNotIn(FAKE_VALUE, str(cm.exception))
+        self.assertTrue(store.has("g", "API_KEY"))
+
+    def test_entry_not_found_is_ignored(self):
+        store.set_secret("g", "API_KEY", FAKE_VALUE)
+        del self.fake.d[("vaultlet:g", "API_KEY")]  # backend no longer has it
+        store.delete("g", "API_KEY")  # PasswordDeleteError swallowed
+        self.assertFalse(store.has("g", "API_KEY"))
+
+
 @unittest.skipUnless(os.environ.get("SEALREF_LIVE_KEYRING") == "1",
                      "set SEALREF_LIVE_KEYRING=1 inside a session with a real keyring")
 class LiveKeyringTest(unittest.TestCase):

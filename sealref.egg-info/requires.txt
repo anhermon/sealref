@@ -1,6 +1,0 @@
-
-[keyring]
-keyring>=24
-
-[mcp]
-mcp<2,>=1.0

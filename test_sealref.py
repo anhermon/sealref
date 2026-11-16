@@ -64,7 +64,7 @@ class FakeKeyring:
         self.d[(svc, user)] = pw
     def delete_password(self, svc, user):
         if (svc, user) not in self.d:
-            raise KeyError("absent")
+            raise backends.PasswordDeleteError("absent")
         del self.d[(svc, user)]
 
 
