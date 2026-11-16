@@ -5,3 +5,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gnome-keyring dbus dbus-x11 libsecret-tools ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir keyring mcp==1.29.0
+# Optional extra packages (linux-docker.sh keyrings-alt installs keyrings.alt).
+ARG EXTRA_PIP=""
+RUN if [ -n "$EXTRA_PIP" ]; then pip install --no-cache-dir $EXTRA_PIP; fi
