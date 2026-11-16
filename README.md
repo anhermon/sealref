@@ -50,7 +50,7 @@ for macOS; Linux is in [Install](#install).
    for you to type the value, and the agent runs its command through sealref:
 
    ```sh
-   sealref run --ref sealref://stripe/API_KEY -- sh -c 'curl -s https://api.stripe.com/v1/balance -u "$API_KEY:"'
+   sealref run --ref sealref://stripe/API_KEY -- sh -c 'printf "user = \"%s:\"\n" "$API_KEY" | curl -s -K - https://api.stripe.com/v1/balance'
    ```
 
 ## FAQ
@@ -209,9 +209,14 @@ server uses. Tools: `list_groups`, `list_keys`, `has_secret`,
 3. To use it, the agent runs the real command through sealref:
 
    ```sh
-   sealref run --ref sealref://stripe/API_KEY -- sh -c 'curl -s https://api.stripe.com/v1/balance -u "$API_KEY:"'
+   sealref run --ref sealref://stripe/API_KEY -- sh -c 'printf "user = \"%s:\"\n" "$API_KEY" | curl -s -K - https://api.stripe.com/v1/balance'
    sealref run --group stripe -- ./deploy.sh
    ```
+
+   `printf` is a shell builtin and `curl -K -` reads its config (here the Basic
+   auth line) from stdin, so the value never appears in any process's
+   command-line arguments. Do not write `curl -u "$API_KEY:"`: that puts the
+   value in curl's argv, which any local process can read with `ps`.
 
    The value goes into the child's environment. The child's stderr is merged
    into its stdout, and that combined output comes back on sealref's stdout.
@@ -321,7 +326,7 @@ wants the value.
 - A child that takes the secret as a command-line argument (for example
   `curl -u "$API_KEY:"` inside `sh -c`) exposes it to other local processes via
   `ps`. Pass secrets on stdin, in a config file read from stdin, or through the
-  environment instead (see the curl example above).
+  environment instead (see the `curl -K -` example above).
 - Scrubbing is line-based and covers only the raw value, standard base64 and
   URL-quoting (`urllib.parse.quote`). It does not cover hex, urlsafe base64,
   `quote_plus`, a value split across lines, or the base64 of the value

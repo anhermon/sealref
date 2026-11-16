@@ -23,6 +23,12 @@
 - Python floor is now 3.10 (was declared 3.9, which made `uv run --with mcp` fail
   to resolve so the MCP server never started). Guarded by a test.
 - `keyring` backend only accepts OS keystores; plaintext backends are refused.
+  When several backends are viable (e.g. Secret Service next to `keyrings.alt`)
+  sealref uses the highest-priority OS keystore directly, never the chain. A
+  plaintext backend forced via `PYTHON_KEYRING_BACKEND` / `keyringrc.cfg` is an
+  error even if a secure one exists. `DELETE` in the entry page returns a JSON
+  error when no keystore is available. `scripts/linux-docker.sh keyrings-alt`
+  covers the mixed case.
   Backend failures print one line and exit 1 instead of a traceback.
 - Console scripts `sealref` and `vaultlet`; Linux (Docker) e2e scripts; Windows marked untested.
 
