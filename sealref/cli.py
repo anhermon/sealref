@@ -12,6 +12,7 @@ PROG = os.environ.get("SEALREF_PROG", "sealref")  # "vaultlet" when run via the 
 REDACT_MIN_LEN = 4
 DEFAULT_PORT = 8765
 DEFAULT_TIMEOUT = 300
+EXIT_STORE_ERROR = 1
 
 USAGE = """usage: {prog} <command> [args...]
 
@@ -173,8 +174,16 @@ def cmd_run(rest):
     except ValueError as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2
-
-    import os
+    except KeyError as e:
+        print(f"{PROG}: secret not found: {e.args[0] if e.args else ''}", file=sys.stderr)
+        return EXIT_STORE_ERROR
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        # Backend failures (no keyring, write refused, item missing): one clean
+        # line, no traceback. CalledProcessError's str() holds argv only, and
+        # `security -w` puts nothing secret in argv.
+        msg = "secret not found in the OS keystore" if isinstance(e, subprocess.CalledProcessError) else e
+        print(f"{PROG}: {msg}", file=sys.stderr)
+        return EXIT_STORE_ERROR
 
     env = os.environ.copy()
     secrets = []  # (group, key, value)
@@ -251,3 +260,13 @@ def main(argv=None):
     except ValueError as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2
+    except KeyError as e:
+        print(f"{PROG}: secret not found: {e.args[0] if e.args else ''}", file=sys.stderr)
+        return EXIT_STORE_ERROR
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        # Backend failures (no keyring, write refused, item missing): one clean
+        # line, no traceback. CalledProcessError's str() holds argv only, and
+        # `security -w` puts nothing secret in argv.
+        msg = "secret not found in the OS keystore" if isinstance(e, subprocess.CalledProcessError) else e
+        print(f"{PROG}: {msg}", file=sys.stderr)
+        return EXIT_STORE_ERROR

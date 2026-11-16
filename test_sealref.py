@@ -233,6 +233,7 @@ class IndexAtomicWriteTest(unittest.TestCase):
             data = json.load(f)
         self.assertIn("g1", data["groups"])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX modes; Windows uses profile ACLs")
     def test_save_sets_mode_0600(self):
         store.create_group("g1")
         mode = os.stat(self.index_path).st_mode & 0o777

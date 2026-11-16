@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Python floor is now 3.10 (was declared 3.9, which made `uv run --with mcp` fail
+  to resolve so the MCP server never started). Guarded by a test.
+- `keyring` backend only accepts OS keystores; plaintext backends are refused.
+  Backend failures print one line and exit 1 instead of a traceback.
+- Console scripts `sealref` and `vaultlet`; Linux (Docker) e2e scripts; Windows marked untested.
+
 - Renamed to **sealref**. New primary command `sealref` and ref scheme
   `sealref://group/key`. Fully backward compatible: the `vaultlet` command,
   `python -m vaultlet[.mcp_server]` and `vaultlet://` refs work unchanged; both

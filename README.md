@@ -74,16 +74,27 @@ sandbox. Gate `sealref run` behind your agent's permission prompts.
 
 ## Install
 
-Requires Python 3 (tested on 3.12). On macOS the CLI uses only the standard
-library; on Linux and Windows install the `keyring` extra
-(`pip install 'sealref[keyring]'`, see [Platforms](#platforms)). The MCP server needs `mcp` 1.x, run through `uv` so nothing is
-installed into your environment.
+Requires **Python 3.10 or newer** (the MCP server's `mcp` dependency needs it;
+tested on 3.12). macOS needs nothing beyond the standard library; Linux and
+Windows need the `keyring` extra. The MCP server runs through `uv`, so nothing
+is installed into your environment.
 
 ```sh
+# macOS
 git clone https://github.com/anhermon/sealref ~/src/sealref
-ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # or add bin/ to PATH
-brew install uv                                              # for the MCP server
+ln -s ~/src/sealref/bin/sealref /usr/local/bin/sealref   # or: pip install ~/src/sealref
+brew install uv                                          # for the MCP server
+
+# Linux desktop (needs a running, unlocked Secret Service: GNOME Keyring or KWallet)
+pip install 'sealref[keyring] @ git+https://github.com/anhermon/sealref'
+curl -LsSf https://astral.sh/uv/install.sh | sh          # for the MCP server
+
+# Windows (untested): pip install "sealref[keyring] @ git+https://github.com/anhermon/sealref"
 ```
+
+`pip install` creates `sealref` and `vaultlet` console commands on every
+platform; the `bin/` shell scripts are only a no-install convenience for
+macOS/Linux.
 
 ## Quickstart
 
@@ -146,17 +157,32 @@ and listing needs no backend support. Items are always service `vaultlet:<group>
 account `<key>`. Pick with `SEALREF_BACKEND=macos|keyring`; default is `macos`
 on darwin and `keyring` elsewhere.
 
-| Backend | Platform | Dependency | Status |
+| Platform | Backend | Status | How it was tested |
 |---|---|---|---|
-| `macos` | macOS Keychain via `security` | none | Exercised for real on macOS 15 / Python 3.12: round-trip test and the demo. |
-| `keyring` | Linux Secret Service (GNOME Keyring, KWallet) | `pip install 'sealref[keyring]'` | Unit-tested against an in-memory fake only. Not run on Linux. |
-| `keyring` | Windows Credential Manager | same | Unit-tested against a fake only. Not run on Windows. Credential Manager caps a value at about 2.5 KB. |
+| macOS | `macos` (Keychain via `security`) | Supported | Real Keychain round trip and the demo, macOS 15, Python 3.12. |
+| Linux desktop (Secret Service) | `keyring` | Supported | Debian 12 container, Python 3.12, `gnome-keyring` under `dbus-run-session`: unit tests, a live keyring round trip, store, `run` with scrubbing, and the MCP server over stdio (`scripts/linux-docker.sh desktop`). Not tried on KWallet or a physical desktop. |
+| Linux headless, CI, containers, WSL without a keyring daemon | none | **Not supported** | Tested: sealref exits 1 with `no usable OS keyring ...` and stores nothing (`scripts/linux-docker.sh headless`). No encrypted-file fallback, see below. |
+| Windows | `keyring` (Credential Manager) | **Untested** | Code paths reviewed and made portable; never run on Windows. Credential Manager caps a value at about 2.5 KB. |
+
+`sealref` only uses `keyring` backends that are OS keystores (Secret Service,
+libsecret, KWallet, macOS, Windows). If `keyring` selects anything else, for
+example the plaintext backend from `keyrings.alt` or a
+`PYTHON_KEYRING_BACKEND` override, sealref refuses and exits 1 rather than
+store the value.
 
 There is deliberately no encrypted-file fallback. Doing it safely needs an
 AEAD and a KDF (not in the standard library) and a passphrase prompt that
 `sealref run` cannot do unattended; plaintext or home-rolled crypto would be
 worse than a clear error. On a headless Linux box without a Secret Service
-daemon, sealref fails with the keyring error rather than degrading.
+daemon, sealref fails with a one-line error (`sealref: no usable OS keyring
+...`) rather than degrading. A secure headless option (for example an encrypted
+file unlocked by a passphrase) is an open design choice and is not built.
+
+Windows notes: `~/.vaultlet` is created with the default user-profile ACLs (the
+POSIX 0700/0600 modes are not enforced there), and the examples that use
+`sh -c` and `demo/demo.sh` assume a POSIX shell. `sealref run` itself does not
+use a shell, so on Windows pass the program directly, e.g.
+`sealref run --ref sealref://g/K -- python -c "import os; print(len(os.environ['K']))"`.
 
 ## How it works
 
@@ -225,8 +251,12 @@ rotation, a hardened boundary against a hostile agent, or production secrets.
 ## Development
 
 ```sh
-python3 -m unittest -v test_sealref
+python3 -m unittest -v test_sealref test_crossplatform
 ```
+
+The MCP and live-keyring tests need `pip install mcp keyring`; without `mcp` they skip.
+Linux runs: `scripts/linux-docker.sh desktop` and `scripts/linux-docker.sh headless`
+(Docker, e.g. colima; the repo must be under a path the VM mounts).
 
 The backend tests use fakes and never touch a real store. The Keychain round-trip test writes and deletes an item named
 `vaultlet:vaultlet-test-integration`. Set `SEALREF_SKIP_KEYCHAIN=1` (or legacy `VAULTLET_SKIP_KEYCHAIN=1`) to skip it.

@@ -45,10 +45,50 @@ class MacKeychain:
             capture_output=True)
 
 
+# Only OS-backed stores are accepted. keyring also ships (via the separate
+# keyrings.alt package) plaintext/file backends and can be pointed at them with
+# PYTHON_KEYRING_BACKEND; storing a secret there would break the no-plaintext
+# invariant, so anything outside this allow-list is refused, never used.
+SECURE_KEYRING_MODULES = (
+    "keyring.backends.SecretService",
+    "keyring.backends.libsecret",
+    "keyring.backends.kwallet",
+    "keyring.backends.macOS",
+    "keyring.backends.Windows",
+)
+
+NO_KEYRING_MSG = (
+    "no usable OS keyring ({detail}). {prog} stores secrets only in the OS keystore and "
+    "never falls back to a plaintext file. On Linux install and unlock a Secret Service "
+    "provider (GNOME Keyring or KWallet; a desktop login session provides one). Headless "
+    "hosts, CI, containers and WSL without a keyring daemon are not supported: use the "
+    "environment's own secret store there."
+)
+
+
+class KeystoreUnavailable(RuntimeError):
+    """No OS keystore (or only an insecure one) is available."""
+
+
+def _checked_keyring(kr):
+    """Return kr only if its active backend is an OS keystore; else RuntimeError."""
+    prog = os.environ.get("SEALREF_PROG", "sealref")
+    try:
+        active = kr.get_keyring()
+    except Exception as e:
+        raise KeystoreUnavailable(NO_KEYRING_MSG.format(detail=type(e).__name__, prog=prog)) from None
+    module = type(active).__module__
+    if not module.startswith(SECURE_KEYRING_MODULES):
+        detail = "keyring backend %s.%s is not an OS keystore" % (module, type(active).__name__)
+        raise KeystoreUnavailable(NO_KEYRING_MSG.format(detail=detail, prog=prog))
+    return kr
+
+
 class Keyring:
     name = "keyring"
 
     def __init__(self, kr=None):
+        injected = kr
         if kr is None:
             try:
                 import keyring as kr
@@ -56,22 +96,35 @@ class Keyring:
                 raise RuntimeError(
                     "this platform needs the optional keyring library: pip install 'sealref[keyring]'")
         self.kr = kr
+        self._real = injected is None  # injected fakes (tests) have no backend class to vet
+
+    def _kr(self):
+        return _checked_keyring(self.kr) if self._real else self.kr
 
     def get(self, group, key):
-        v = self.kr.get_password(_service(group), key)
+        try:
+            v = self._kr().get_password(_service(group), key)
+        except KeystoreUnavailable:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"keyring read failed ({type(e).__name__})") from None
         if v is None:
             raise KeyError(f"{group}/{key} not found in keyring")
         return v
 
     def set(self, group, key, value):
         try:
-            self.kr.set_password(_service(group), key, value)
+            self._kr().set_password(_service(group), key, value)
+        except KeystoreUnavailable:
+            raise
         except Exception as e:  # keyring raises backend-specific types; don't echo the value
             raise RuntimeError(f"keyring write failed ({type(e).__name__})") from None
 
     def delete(self, group, key):
         try:
-            self.kr.delete_password(_service(group), key)
+            self._kr().delete_password(_service(group), key)
+        except KeystoreUnavailable:
+            raise  # no usable keyring is an error, "already absent" is not
         except Exception:
             pass  # already absent, same as the macOS path
 
