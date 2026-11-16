@@ -277,6 +277,28 @@ class HeadlessErrorTest(_Isolated):
         self.assertEqual(os.listdir(self.tmp), [])  # nothing written anywhere
 
 
+@unittest.skipUnless(HAS_MCP, "mcp not installed")
+class RequestSecretStdoutTest(unittest.TestCase):
+    """The MCP tool itself (not just ui.serve_until): stdout is the JSON-RPC
+    channel, so request_secret must write nothing to it."""
+
+    def test_request_secret_writes_nothing_to_stdout(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        code = ("import socket; socket.getfqdn = lambda name='': name\n"
+                "from sealref import mcp_server, ui\n"
+                "ui._BROWSER_HELPER = ['true']\n"
+                "mcp_server.DEFAULT_TIMEOUT = 1\n"
+                "try:\n    mcp_server.request_secret('g', 'API_KEY', 'test')\n"
+                "except RuntimeError as e:\n    import sys; print(e, file=sys.stderr)\n")
+        env = {**os.environ, "PYTHONPATH": ROOT, "HOME": tmp}
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                           text=True, timeout=MCP_TIMEOUT_S)
+        self.assertEqual(r.stdout, "", r.stderr)
+        self.assertIn("serving on http://127.0.0.1:", r.stderr)
+        self.assertIn("timed out waiting for secret", r.stderr)
+
+
 class UiBackendUnavailableTest(_Isolated):
     """DELETE through the entry page with no usable keystore: clean JSON error,
     no traceback, and the server keeps answering."""
