@@ -47,8 +47,9 @@ class MacKeychain:
 
 # Only OS-backed stores are accepted. keyring also ships (via the separate
 # keyrings.alt package) plaintext/file backends and can be pointed at them with
-# PYTHON_KEYRING_BACKEND; storing a secret there would break the no-plaintext
-# invariant, so anything outside this allow-list is refused, never used.
+# PYTHON_KEYRING_BACKEND or keyringrc.cfg; storing a secret there would break the
+# no-plaintext invariant, so anything outside this allow-list is refused, never used.
+# Matched as an exact module name or a submodule ("<module>."), not a bare prefix.
 SECURE_KEYRING_MODULES = (
     "keyring.backends.SecretService",
     "keyring.backends.libsecret",
@@ -56,6 +57,7 @@ SECURE_KEYRING_MODULES = (
     "keyring.backends.macOS",
     "keyring.backends.Windows",
 )
+CHAINER_MODULE = "keyring.backends.chainer"
 
 NO_KEYRING_MSG = (
     "no usable OS keyring ({detail}). {prog} stores secrets only in the OS keystore and "
@@ -70,18 +72,40 @@ class KeystoreUnavailable(RuntimeError):
     """No OS keystore (or only an insecure one) is available."""
 
 
+def _backend_name(b):
+    return "%s.%s" % (type(b).__module__, type(b).__name__)
+
+
+def _is_secure_backend(b):
+    module = type(b).__module__
+    return any(module == m or module.startswith(m + ".") for m in SECURE_KEYRING_MODULES)
+
+
 def _checked_keyring(kr):
-    """Return kr only if its active backend is an OS keystore; else RuntimeError."""
+    """Return the highest-priority allow-listed backend object, or raise.
+
+    keyring hands back a ChainerBackend whenever several backends are viable
+    (e.g. Secret Service next to keyrings.alt). A chain as a whole is never
+    accepted, because it can fall through to a plaintext member; instead its
+    members are searched in priority order and the first OS keystore is used
+    directly. A backend the user forced (PYTHON_KEYRING_BACKEND, keyringrc.cfg)
+    arrives as itself, not as a chain, so a forced non-allow-listed backend is
+    refused even when a secure one exists."""
     prog = os.environ.get("SEALREF_PROG", "sealref")
     try:
         active = kr.get_keyring()
+        chained = type(active).__module__ == CHAINER_MODULE
+        candidates = list(active.backends) if chained else [active]
     except Exception as e:
         raise KeystoreUnavailable(NO_KEYRING_MSG.format(detail=type(e).__name__, prog=prog)) from None
-    module = type(active).__module__
-    if not module.startswith(SECURE_KEYRING_MODULES):
-        detail = "keyring backend %s.%s is not an OS keystore" % (module, type(active).__name__)
-        raise KeystoreUnavailable(NO_KEYRING_MSG.format(detail=detail, prog=prog))
-    return kr
+    for b in candidates:
+        if _is_secure_backend(b):
+            return b
+    detail = "keyring backend %s is not an OS keystore" % _backend_name(active)
+    if chained:
+        detail = "none of the chained keyring backends is an OS keystore: %s" % (
+            ", ".join(_backend_name(b) for b in candidates) or "none")
+    raise KeystoreUnavailable(NO_KEYRING_MSG.format(detail=detail, prog=prog))
 
 
 class Keyring:
@@ -99,6 +123,8 @@ class Keyring:
         self._real = injected is None  # injected fakes (tests) have no backend class to vet
 
     def _kr(self):
+        # The vetted backend object itself, never the keyring module (whose
+        # active backend could be a chain with an insecure member).
         return _checked_keyring(self.kr) if self._real else self.kr
 
     def get(self, group, key):

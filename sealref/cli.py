@@ -174,16 +174,6 @@ def cmd_run(rest):
     except ValueError as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2
-    except KeyError as e:
-        print(f"{PROG}: secret not found: {e.args[0] if e.args else ''}", file=sys.stderr)
-        return EXIT_STORE_ERROR
-    except (RuntimeError, subprocess.CalledProcessError) as e:
-        # Backend failures (no keyring, write refused, item missing): one clean
-        # line, no traceback. CalledProcessError's str() holds argv only, and
-        # `security -w` puts nothing secret in argv.
-        msg = "secret not found in the OS keystore" if isinstance(e, subprocess.CalledProcessError) else e
-        print(f"{PROG}: {msg}", file=sys.stderr)
-        return EXIT_STORE_ERROR
 
     env = os.environ.copy()
     secrets = []  # (group, key, value)

@@ -116,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found"})
         except ValueError as e:
             self._json(400, {"error": str(e)})
+        except RuntimeError as e:  # backend unavailable (KeystoreUnavailable): clean JSON, same as POST
+            self._json(500, {"error": str(e)})
 
 
 # Command that opens a URL (appended as the last argument). Tests replace it.
