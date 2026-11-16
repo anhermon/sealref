@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sealref"
+version = "0.2.0"
+description = "Keep API keys out of agent transcripts: secret refs, env injection, scrubbed output"
+requires-python = ">=3.10"   # mcp needs 3.10+; guarded by test_crossplatform.PythonFloorTest
+license = {text = "MIT"}
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.optional-dependencies]
+keyring = ["keyring>=24"]   # Linux Secret Service, Windows Credential Manager
+mcp = ["mcp>=1.0,<2"]
+
+[project.scripts]
+sealref = "sealref.cli:main"
+vaultlet = "vaultlet.__main__:main"   # legacy command name
+
+[tool.setuptools]
+packages = ["sealref", "vaultlet"]

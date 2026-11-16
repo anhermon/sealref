@@ -12,6 +12,7 @@ PROG = os.environ.get("SEALREF_PROG", "sealref")  # "vaultlet" when run via the 
 REDACT_MIN_LEN = 4
 DEFAULT_PORT = 8765
 DEFAULT_TIMEOUT = 300
+EXIT_STORE_ERROR = 1
 
 USAGE = """usage: {prog} <command> [args...]
 
@@ -19,6 +20,7 @@ commands:
   groups
   keys <group>
   ui [--port N]
+  set <group> <key>      (hidden prompt; or pipe the value on stdin)
   request <group> <key> [--reason TEXT]
   run [--group G]... [--ref sealref://g/k[=ENVNAME]]... -- <cmd> [args...]
 
@@ -73,6 +75,20 @@ def cmd_keys(rest):
     group = rest[0]
     for key in store.list_keys(group):
         print(f"{key}  {store.ref(group, key)}")
+    return 0
+
+
+def cmd_set(rest):
+    if len(rest) != 2:
+        print(f"{PROG}: usage: {PROG} set <group> <key>", file=sys.stderr)
+        return 2
+    group, key = rest
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass(f"value for {group}/{key} (hidden): ")
+    else:
+        value = sys.stdin.read().rstrip("\n")  # piped: keeps the value out of argv and history
+    print(store.set_secret(group, key, value))
     return 0
 
 
@@ -159,8 +175,6 @@ def cmd_run(rest):
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2
 
-    import os
-
     env = os.environ.copy()
     secrets = []  # (group, key, value)
 
@@ -207,6 +221,7 @@ def cmd_run(rest):
 COMMANDS = {
     "groups": cmd_groups,
     "keys": cmd_keys,
+    "set": cmd_set,
     "ui": cmd_ui,
     "request": cmd_request,
     "run": cmd_run,
@@ -243,3 +258,13 @@ def main(argv=None):
     except ValueError as e:
         print(f"{PROG}: {e}", file=sys.stderr)
         return 2
+    except KeyError as e:
+        print(f"{PROG}: secret not found: {e.args[0] if e.args else ''}", file=sys.stderr)
+        return EXIT_STORE_ERROR
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        # Backend failures (no keyring, write refused, item missing): one clean
+        # line, no traceback. CalledProcessError's str() holds argv only, and
+        # `security -w` puts nothing secret in argv.
+        msg = "secret not found in the OS keystore" if isinstance(e, subprocess.CalledProcessError) else e
+        print(f"{PROG}: {msg}", file=sys.stderr)
+        return EXIT_STORE_ERROR

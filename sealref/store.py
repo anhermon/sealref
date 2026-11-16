@@ -1,12 +1,14 @@
-"""Index (~/.vaultlet/index.json) + macOS Keychain storage.
+"""Index (~/.vaultlet/index.json) + pluggable secret backend (see backends.py).
 
 Storage names stay "vaultlet" (dir ~/.vaultlet, Keychain service "vaultlet:<group>")
 so existing installs need no migration."""
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401  (tests patch store.subprocess.run; same module backends uses)
 from datetime import datetime, timezone
+
+from .backends import get_backend
 
 VAULT_DIR = os.path.expanduser("~/.vaultlet")
 INDEX_PATH = os.path.join(VAULT_DIR, "index.json")
@@ -95,14 +97,7 @@ def set_secret(group: str, key: str, value: str) -> str:
     _validate_key(key)
     if not value or any(c in value for c in "\n\r\0"):
         raise ValueError("value must be non-empty and contain no newline or NUL")
-    # The value goes to `security -i` on stdin, not argv, so it never appears
-    # in `ps` output. security's command parser takes double-quoted strings
-    # with backslash escapes. Limit: values containing newlines are rejected.
-    esc = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
-    cmd = f'add-generic-password -a "{esc(key)}" -s "vaultlet:{esc(group)}" -w "{esc(value)}" -U\n'
-    r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True)
-    if r.returncode != 0 or "returned -" in r.stdout + r.stderr:
-        raise RuntimeError("keychain write failed (security exit %d)" % r.returncode)
+    get_backend().set(group, key, value)
     index = _load_index()
     index["groups"].setdefault(group, {"keys": {}})
     index["groups"][group]["keys"][key] = {
@@ -115,10 +110,7 @@ def set_secret(group: str, key: str, value: str) -> str:
 def delete(group: str, key: str) -> None:
     _validate_group(group)
     _validate_key(key)
-    subprocess.run(
-        ["security", "delete-generic-password", "-a", key, "-s", f"vaultlet:{group}"],
-        capture_output=True,
-    )
+    get_backend().delete(group, key)
     index = _load_index()
     if group in index["groups"]:
         index["groups"][group]["keys"].pop(key, None)
@@ -135,13 +127,7 @@ def delete_group(group: str) -> None:
 
 
 def _resolve(group: str, key: str) -> str:
-    result = subprocess.run(
-        ["security", "find-generic-password", "-a", key, "-s", f"vaultlet:{group}", "-w"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.rstrip("\n")
+    return get_backend().get(group, key)
 
 
 def _resolve_group(group: str) -> dict:

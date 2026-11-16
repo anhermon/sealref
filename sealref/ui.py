@@ -116,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found"})
         except ValueError as e:
             self._json(400, {"error": str(e)})
+        except RuntimeError as e:  # backend unavailable (KeystoreUnavailable): clean JSON, same as POST
+            self._json(500, {"error": str(e)})
 
 
 # Command that opens a URL (appended as the last argument). Tests replace it.
@@ -248,7 +250,7 @@ PAGE = """<!doctype html>
 <body>
 <main>
   <h1>sealref</h1>
-  <div class="sub">Values go to the macOS Keychain from this page — never into the agent chat.</div>
+  <div class="sub">Secrets live in your OS keystore. Values never leave this page.</div>
   <div id="banner"></div>
   <div class="new-group">
     <input id="new-group-name" type="text" placeholder="new group name">

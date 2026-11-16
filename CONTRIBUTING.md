@@ -2,7 +2,7 @@
 
 Small project; issues and pull requests are welcome.
 
-- Run `python3 -m unittest -v test_sealref` before sending a change. Add a test
+- Run `python3 -m unittest -v test_sealref test_crossplatform` before sending a change. Add a test
   for any behavior change.
 - Keep the CLI standard-library only. The MCP server's `mcp` dependency is the
   one exception.
